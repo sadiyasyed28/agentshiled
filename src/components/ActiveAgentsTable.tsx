@@ -8,13 +8,15 @@ import type { Agent } from '../types';
 interface ActiveAgentsTableProps {
   onSelectAgent: (agent: Agent) => void;
   onViewAll: () => void;
+  agents?: Agent[];
 }
 
 export const ActiveAgentsTable: React.FC<ActiveAgentsTableProps> = ({
   onSelectAgent,
   onViewAll,
+  agents: customAgents,
 }) => {
-  const agents: Agent[] = [
+  const defaultAgents: Agent[] = [
     {
       id: 'research-agent',
       name: 'research-agent',
@@ -64,6 +66,8 @@ export const ActiveAgentsTable: React.FC<ActiveAgentsTableProps> = ({
       description: 'Outbound dispatch agent paused due to high risk score anomaly.',
     },
   ];
+
+  const agents = customAgents && customAgents.length > 0 ? customAgents : defaultAgents;
 
   return (
     <PixelCard className="h-full flex-1" innerClassName="p-3.5 justify-between h-full">

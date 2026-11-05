@@ -3,11 +3,35 @@ import { PixelLayersIcon, PixelInfoIcon } from './pixel/PixelIcons';
 import { PixelCard } from './pixel/PixelCard';
 import { AnimatedNumber } from './pixel/AnimatedNumber';
 
-export const DecisionDistribution: React.FC = () => {
+export interface DecisionCounts {
+  allowed?: number;
+  review?: number;
+  blocked?: number;
+}
+
+interface DecisionDistributionProps {
+  counts?: DecisionCounts | null;
+}
+
+export const DecisionDistribution: React.FC<DecisionDistributionProps> = ({ counts }) => {
+  const allowCount = counts?.allowed ?? 2976;
+  const reviewCount = counts?.review ?? 437;
+  const blockCount = counts?.blocked ?? 429;
+  const total = allowCount + reviewCount + blockCount || 3842;
+
+  const allowPct = Number(((allowCount / total) * 100).toFixed(1));
+  const reviewPct = Number(((reviewCount / total) * 100).toFixed(1));
+  const blockPct = Number(Math.max(0, 100 - allowPct - reviewPct).toFixed(1));
+
+  const circumference = 276.4;
+  const allowLen = Number(((allowPct / 100) * circumference).toFixed(1));
+  const reviewLen = Number(((reviewPct / 100) * circumference).toFixed(1));
+  const blockLen = Number(((blockPct / 100) * circumference).toFixed(1));
+
   const items = [
-    { label: 'Allowed', percentage: 77.5, count: 2976, color: '#22c55e' },
-    { label: 'Review', percentage: 11.4, count: 437, color: '#eab308' },
-    { label: 'Blocked', percentage: 11.2, count: 429, color: '#ef4444' },
+    { label: 'Allowed', percentage: allowPct, count: allowCount, color: '#22c55e' },
+    { label: 'Review', percentage: reviewPct, count: reviewCount, color: '#eab308' },
+    { label: 'Blocked', percentage: blockPct, count: blockCount, color: '#ef4444' },
   ];
 
   return (
@@ -28,7 +52,7 @@ export const DecisionDistribution: React.FC = () => {
         </button>
       </div>
 
-      {/* Body: Donut on Left, Legend on Right - tightly grouped to eliminate awkward gap */}
+      {/* Body: Donut on Left, Legend on Right */}
       <div className="flex flex-row items-center justify-center gap-5 my-auto py-2">
         {/* Pixel-Stepped Donut Chart */}
         <div className="relative flex items-center justify-center w-32 h-32 flex-shrink-0">
@@ -47,7 +71,7 @@ export const DecisionDistribution: React.FC = () => {
               strokeWidth="15"
             />
 
-            {/* Allowed Arc: Green (77.5%) -> 214 of 276.4 */}
+            {/* Allowed Arc: Green */}
             <circle
               cx="60"
               cy="60"
@@ -55,18 +79,18 @@ export const DecisionDistribution: React.FC = () => {
               fill="none"
               stroke="#22c55e"
               strokeWidth="15"
-              strokeDasharray="214.2 276.4"
+              strokeDasharray={`${allowLen} ${circumference}`}
               strokeDashoffset="0"
               className="donut-segment"
               style={
                 {
-                  '--donut-length': '214.2',
-                  '--donut-gap': '276.4',
+                  '--donut-length': String(allowLen),
+                  '--donut-gap': String(circumference),
                 } as React.CSSProperties
               }
             />
 
-            {/* Review Arc: Yellow (11.4%) -> 31.5 of 276.4 */}
+            {/* Review Arc: Yellow */}
             <circle
               cx="60"
               cy="60"
@@ -74,19 +98,19 @@ export const DecisionDistribution: React.FC = () => {
               fill="none"
               stroke="#eab308"
               strokeWidth="15"
-              strokeDasharray="31.5 276.4"
-              strokeDashoffset="-214.2"
+              strokeDasharray={`${reviewLen} ${circumference}`}
+              strokeDashoffset={`-${allowLen}`}
               className="donut-segment"
               style={
                 {
-                  '--donut-length': '31.5',
-                  '--donut-gap': '276.4',
+                  '--donut-length': String(reviewLen),
+                  '--donut-gap': String(circumference),
                   animationDelay: '180ms',
                 } as React.CSSProperties
               }
             />
 
-            {/* Blocked Arc: Red (11.2%) -> 30.9 of 276.4 */}
+            {/* Blocked Arc: Red */}
             <circle
               cx="60"
               cy="60"
@@ -94,13 +118,13 @@ export const DecisionDistribution: React.FC = () => {
               fill="none"
               stroke="#ef4444"
               strokeWidth="15"
-              strokeDasharray="30.7 276.4"
-              strokeDashoffset="-245.7"
+              strokeDasharray={`${blockLen} ${circumference}`}
+              strokeDashoffset={`-${(allowLen + reviewLen).toFixed(1)}`}
               className="donut-segment"
               style={
                 {
-                  '--donut-length': '30.7',
-                  '--donut-gap': '276.4',
+                  '--donut-length': String(blockLen),
+                  '--donut-gap': String(circumference),
                   animationDelay: '320ms',
                 } as React.CSSProperties
               }
@@ -130,7 +154,7 @@ export const DecisionDistribution: React.FC = () => {
           {/* Center Label */}
           <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center">
             <span className="text-[18px] font-bold text-white tracking-tight leading-none">
-              <AnimatedNumber value={3842} />
+              <AnimatedNumber value={total} />
             </span>
             <span className="text-[9.5px] font-medium text-[#938ec0] mt-0.5">
               Total Events

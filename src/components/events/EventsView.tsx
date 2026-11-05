@@ -4,8 +4,9 @@ import { EventsKpiSection } from './EventsKpiSection';
 import { EventsFilterToolbar } from './EventsFilterToolbar';
 import { EventsTable } from './EventsTable';
 import { EventDrawer } from './EventDrawer';
-import { ALL_EVENTS, INITIAL_PRIMARY_EVENTS } from './eventsData';
-import type { SecurityEventRecord, EventsFilterState } from './eventsTypes';
+import { ALL_EVENTS } from './eventsData';
+import type { SecurityEventRecord, EventsFilterState, EventDecision, ExecutionStatus } from './eventsTypes';
+import { apiClient, type ApiEventItem } from '../../api/client';
 
 interface EventsViewProps {
   onRefreshGlobal?: () => void;
@@ -33,6 +34,8 @@ export const EventsView: React.FC<EventsViewProps> = ({
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [dateRange, setDateRange] = useState('Last 7 Days');
   const [localRefreshing, setLocalRefreshing] = useState(false);
+  const [eventsList, setEventsList] = useState<SecurityEventRecord[]>(ALL_EVENTS);
+  const [isLive, setIsLive] = useState(false);
 
   // Selected event for detail drawer
   const [selectedEvent, setSelectedEvent] = useState<SecurityEventRecord | null>(null);
@@ -54,6 +57,65 @@ export const EventsView: React.FC<EventsViewProps> = ({
       closeTimerRef.current = null;
     }
   };
+
+  const mapApiEventToRecord = (apiEvt: ApiEventItem): SecurityEventRecord => {
+    const rawTime = Date.parse(apiEvt.timestamp) || Date.now();
+    const d: EventDecision =
+      apiEvt.decision === 'ALLOW'
+        ? 'Allowed'
+        : apiEvt.decision === 'REVIEW'
+        ? 'Review'
+        : 'Blocked';
+    const ex: ExecutionStatus =
+      apiEvt.execution_status === 'executed'
+        ? 'Executed'
+        : apiEvt.execution_status === 'error'
+        ? 'Not Executed'
+        : 'Not Executed';
+
+    return {
+      id: `EVT-${apiEvt.id}`,
+      timestamp: apiEvt.timestamp ? new Date(apiEvt.timestamp).toLocaleTimeString() : 'Just now',
+      timestampRaw: rawTime,
+      agent: apiEvt.agent,
+      tool: apiEvt.tool,
+      decision: d,
+      riskScore: Math.round(apiEvt.risk_score || 0),
+      execution: ex,
+      policy: apiEvt.policy_version_hash
+        ? `Policy (${apiEvt.policy_version_hash.slice(0, 7)})`
+        : 'Enforced Policy v1',
+      actionSummary: `Agent ${apiEvt.agent} invoked ${apiEvt.tool}`,
+      callerIp: '127.0.0.1 (Internal Runtime)',
+      targetResource: apiEvt.tool,
+      argumentsPayload: apiEvt.arguments,
+      riskFactors: apiEvt.rules_triggered || [],
+      policyMatchedRule: apiEvt.reasons?.[0] || 'Standard Policy Rule',
+      decisionRationale: apiEvt.reasons?.join(', ') || 'Evaluated by PolicyEngine',
+    };
+  };
+
+  const loadEvents = async () => {
+    try {
+      const res = await apiClient.getEvents({ limit: 100 });
+      if (res && Array.isArray(res.events) && res.events.length > 0) {
+        const mapped = res.events.map(mapApiEventToRecord);
+        setEventsList(mapped);
+        setIsLive(true);
+      } else {
+        setEventsList(ALL_EVENTS);
+        setIsLive(false);
+      }
+    } catch {
+      // Offline or network error: fall back to rich demo dataset
+      setEventsList(ALL_EVENTS);
+      setIsLive(false);
+    }
+  };
+
+  useEffect(() => {
+    loadEvents();
+  }, []);
 
   // Open (or swap) the event drawer with an enter animation
   const handleSelectEvent = (evt: SecurityEventRecord) => {
@@ -109,7 +171,7 @@ export const EventsView: React.FC<EventsViewProps> = ({
 
   // Filtered dataset
   const filteredEvents = useMemo(() => {
-    return ALL_EVENTS.filter((evt) => {
+    return eventsList.filter((evt) => {
       // 1. Search query
       if (filters.searchQuery.trim()) {
         const query = filters.searchQuery.toLowerCase();
@@ -162,36 +224,29 @@ export const EventsView: React.FC<EventsViewProps> = ({
 
       return true;
     });
-  }, [filters]);
+  }, [eventsList, filters]);
 
   // Sorted dataset
   const sortedEvents = useMemo(() => {
-    return [...filteredEvents].sort((a, b) => {
-      return sortOrder === 'desc'
-        ? b.timestampRaw - a.timestampRaw
-        : a.timestampRaw - b.timestampRaw;
+    const list = [...filteredEvents];
+    list.sort((a, b) => {
+      if (sortOrder === 'desc') {
+        return b.timestampRaw - a.timestampRaw;
+      } else {
+        return a.timestampRaw - b.timestampRaw;
+      }
     });
+    return list;
   }, [filteredEvents, sortOrder]);
 
   // Paginated dataset
   const paginatedEvents = useMemo(() => {
-    // If on page 1 and no filters, ensure primary 8 match IMAGE 2 perfectly
-    if (currentPage === 1 && activeFilterCount === 0 && sortOrder === 'desc') {
-      return INITIAL_PRIMARY_EVENTS.slice(0, pageSize);
-    }
-    const startIndex = (currentPage - 1) * pageSize;
-    return sortedEvents.slice(startIndex, startIndex + pageSize);
-  }, [sortedEvents, currentPage, pageSize, activeFilterCount, sortOrder]);
+    const start = (currentPage - 1) * pageSize;
+    return sortedEvents.slice(start, start + pageSize);
+  }, [sortedEvents, currentPage, pageSize]);
 
-  // Total count display (maintaining 3,842 total when unfiltered to match IMAGE 2)
-  const displayTotalCount = useMemo(() => {
-    if (activeFilterCount === 0) {
-      return 3842;
-    }
-    return sortedEvents.length;
-  }, [activeFilterCount, sortedEvents.length]);
+  const displayTotalCount = sortedEvents.length;
 
-  // Export handling
   const handleExport = (format: 'csv' | 'json') => {
     const dataToExport = sortedEvents;
     if (format === 'json') {
@@ -227,23 +282,36 @@ export const EventsView: React.FC<EventsViewProps> = ({
     }
   };
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     setLocalRefreshing(true);
     if (onRefreshGlobal) onRefreshGlobal();
-    setTimeout(() => {
-      setLocalRefreshing(false);
-    }, 600);
+    await loadEvents();
+    setLocalRefreshing(false);
   };
 
   return (
     <main className="flex-1 px-5 py-3 md:px-6 md:py-3.5 max-w-[1536px] w-full mx-auto flex flex-col justify-between">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start">
-        {/* LEFT WORKSPACE — expands to full width when the event panel is closed */}
+        {/* LEFT WORKSPACE */}
         <div
           className={`min-w-0 transition-all duration-300 ${
             selectedEvent ? 'lg:col-span-8' : 'lg:col-span-12'
           }`}
         >
+          {/* Status Indicator Banner */}
+          <div className="flex items-center justify-between pb-1.5">
+            <span
+              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
+                isLive
+                  ? 'bg-[#153e28] text-[#4ade80] border-[#1b6d39]'
+                  : 'bg-[#2b2559] text-[#c084fc] border-[#3e3478]'
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-[#4ade80]' : 'bg-[#c084fc]'}`} />
+              {isLive ? 'LIVE TELEMETRY (Connected)' : 'DEMO MODE (Offline Dataset)'}
+            </span>
+          </div>
+
           {/* 1. EVENTS PAGE HEADER */}
           <EventsPageHeader
             onRefresh={handleRefresh}
@@ -283,7 +351,7 @@ export const EventsView: React.FC<EventsViewProps> = ({
           />
         </div>
 
-        {/* RIGHT WORKSPACE: ANIMATED EVENT DETAILS PANEL (4 OF 12 COLS) */}
+        {/* RIGHT WORKSPACE: ANIMATED EVENT DETAILS PANEL */}
         {selectedEvent && (
           <div
             key={selectedEvent.id}
@@ -311,4 +379,3 @@ export const EventsView: React.FC<EventsViewProps> = ({
     </main>
   );
 };
-

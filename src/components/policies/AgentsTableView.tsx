@@ -2,18 +2,30 @@ import React, { useState } from 'react';
 import { Search, ExternalLink, Shield } from 'lucide-react';
 import { ALL_ASSIGNED_AGENTS_SUMMARY } from './policyData';
 import { PixelRobotIcon } from '../pixel/PixelIcons';
-import { AnimatedNumber } from '../pixel/AnimatedNumber';
+import { AnimatedNumber } from './../pixel/AnimatedNumber';
 
 interface AgentsTableViewProps {
   onSelectPolicyByName: (policyName: string) => void;
+  pausedAgentNames?: string[];
+  onTogglePause?: (agentName: string, currentlyPaused: boolean) => void;
 }
 
 export const AgentsTableView: React.FC<AgentsTableViewProps> = ({
   onSelectPolicyByName,
+  pausedAgentNames = [],
+  onTogglePause,
 }) => {
   const [search, setSearch] = useState('');
 
-  const filteredAgents = ALL_ASSIGNED_AGENTS_SUMMARY.filter((ag) => {
+  const agentsWithLiveStatus = ALL_ASSIGNED_AGENTS_SUMMARY.map((ag) => {
+    const isPaused = pausedAgentNames.includes(ag.name);
+    return {
+      ...ag,
+      status: isPaused ? ('Paused' as const) : ag.status,
+    };
+  });
+
+  const filteredAgents = agentsWithLiveStatus.filter((ag) => {
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (
@@ -84,15 +96,29 @@ export const AgentsTableView: React.FC<AgentsTableViewProps> = ({
                   </td>
 
                   <td className="py-3 px-3">
-                    <span
-                      className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold ${
-                        ag.status === 'Active'
-                          ? 'bg-[#15803d]/30 border border-[#22c55e] text-[#4ade80]'
-                          : 'bg-[#a16207]/30 border border-[#eab308] text-[#fde047]'
-                      }`}
-                    >
-                      {ag.status}
-                    </span>
+                    {onTogglePause ? (
+                      <button
+                        onClick={() => onTogglePause(ag.name, ag.status === 'Paused')}
+                        title={ag.status === 'Active' ? 'Click to pause agent' : 'Click to unpause agent'}
+                        className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold cursor-pointer transition-all hover:scale-105 ${
+                          ag.status === 'Active'
+                            ? 'bg-[#15803d]/30 border border-[#22c55e] text-[#4ade80] hover:bg-[#15803d]/50'
+                            : 'bg-[#a16207]/30 border border-[#eab308] text-[#fde047] hover:bg-[#a16207]/50'
+                        }`}
+                      >
+                        {ag.status}
+                      </button>
+                    ) : (
+                      <span
+                        className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold ${
+                          ag.status === 'Active'
+                            ? 'bg-[#15803d]/30 border border-[#22c55e] text-[#4ade80]'
+                            : 'bg-[#a16207]/30 border border-[#eab308] text-[#fde047]'
+                        }`}
+                      >
+                        {ag.status}
+                      </span>
+                    )}
                   </td>
 
                   <td className="py-3 px-3 text-[#9c96c9] font-medium text-[12px]">

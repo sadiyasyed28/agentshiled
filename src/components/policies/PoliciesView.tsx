@@ -8,9 +8,13 @@ import { PolicyModal } from './PolicyModal';
 import { AgentsTableView } from './AgentsTableView';
 import { INITIAL_POLICIES } from './policyData';
 import type { SecurityPolicy, PolicyFilterState } from './policyTypes';
+import { apiClient } from '../../api/client';
 
 export const PoliciesView: React.FC = () => {
   const [policies, setPolicies] = useState<SecurityPolicy[]>(INITIAL_POLICIES);
+  const [isLive, setIsLive] = useState(false);
+  const [pausedAgents, setPausedAgents] = useState<string[]>([]);
+
   // Starts closed so the policy portal only appears on demand
   const [selectedPolicy, setSelectedPolicy] = useState<SecurityPolicy | null>(null);
   const [isDetailClosing, setIsDetailClosing] = useState(false);
@@ -37,8 +41,77 @@ export const PoliciesView: React.FC = () => {
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    setTimeout(() => setToastMessage(null), 3500);
   };
+
+  const loadData = async () => {
+    try {
+      const [policiesRes, agentsRes] = await Promise.allSettled([
+        apiClient.getPolicies(),
+        apiClient.getAgents(),
+      ]);
+
+      if (agentsRes.status === 'fulfilled' && agentsRes.value?.paused_agents) {
+        setPausedAgents(agentsRes.value.paused_agents);
+      }
+
+      if (policiesRes.status === 'fulfilled' && policiesRes.value?.policies) {
+        const pRes = policiesRes.value;
+        const mapped: SecurityPolicy[] = pRes.policies.map((p, idx) => ({
+          id: `pol-${idx + 1}`,
+          name: p.name,
+          version: pRes.version_hash ? pRes.version_hash.slice(0, 8) : 'v1.0.0',
+          status: 'Active',
+          description: p.description,
+          assignedAgentNames: pRes.agents.map((a) => a.name),
+          lastUpdated: 'Live Policy',
+          lastUpdatedTimestamp: Date.now(),
+          rules: {
+            allowedTools: pRes.known_tools || [],
+            argumentLimits: { maxItemsPerRequest: 100, maxFileSize: '50 MB' },
+            allowedHostnames: ['*.internal', 'api.openai.com', 'api.anthropic.com'],
+            defaultDeny: true,
+            reviewThreshold: 60,
+            auditAllActions: true,
+          },
+          versions: [
+            {
+              version: pRes.version_hash ? pRes.version_hash.slice(0, 8) : 'v1.0.0',
+              date: 'Current Hash',
+              author: 'PolicyEngine',
+              description: 'Active immutable policy ruleset',
+              isCurrent: true,
+            },
+          ],
+          agents: pRes.agents.map((a, i) => ({
+            id: `ag-${i + 1}`,
+            name: a.name,
+            runtime: 'AgentShield Sandbox SDK',
+            assignedDate: 'Enforcing',
+            status: pausedAgents.includes(a.name) ? 'Paused' : 'Active',
+          })),
+        }));
+
+        if (mapped.length > 0) {
+          setPolicies(mapped);
+          setIsLive(true);
+        } else {
+          setPolicies(INITIAL_POLICIES);
+          setIsLive(false);
+        }
+      } else {
+        setPolicies(INITIAL_POLICIES);
+        setIsLive(false);
+      }
+    } catch {
+      setPolicies(INITIAL_POLICIES);
+      setIsLive(false);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
 
   // Clear any pending close timer when the view unmounts
   useEffect(() => {
@@ -89,6 +162,23 @@ export const PoliciesView: React.FC = () => {
       status: 'All',
       assignedAgent: 'All',
     });
+  };
+
+  const handleTogglePause = async (agentName: string, currentlyPaused: boolean) => {
+    try {
+      if (currentlyPaused) {
+        await apiClient.unpauseAgent(agentName);
+        setPausedAgents((prev) => prev.filter((a) => a !== agentName));
+        showToast(`Agent ${agentName} restored to Active on server.`);
+      } else {
+        await apiClient.pauseAgent(agentName);
+        setPausedAgents((prev) => [...prev, agentName]);
+        showToast(`Agent ${agentName} paused on server.`);
+      }
+    } catch (err: unknown) {
+      const msg = (err as Error)?.message || 'Failed to update agent status';
+      showToast(`Error: ${msg}`);
+    }
   };
 
   // Filtered policies
@@ -143,20 +233,19 @@ export const PoliciesView: React.FC = () => {
     };
   }, [policies]);
 
-  // Save (Create or Edit)
+  // Local sandbox policy editing/testing
   const handleSavePolicy = (data: Partial<SecurityPolicy>) => {
     cancelCloseTimer();
     setIsDetailClosing(false);
 
     if (policyToEdit) {
-      // Edit existing
       setPolicies((prev) =>
         prev.map((p) => {
           if (p.id === policyToEdit.id) {
             const updated: SecurityPolicy = {
               ...p,
               ...data,
-              lastUpdated: 'Just now',
+              lastUpdated: 'Sandbox Edited',
               lastUpdatedTimestamp: Date.now(),
             } as SecurityPolicy;
             setSelectedPolicy(updated);
@@ -165,17 +254,16 @@ export const PoliciesView: React.FC = () => {
           return p;
         })
       );
-      showToast(`Policy "${data.name}" updated successfully.`);
+      showToast(`Sandbox Policy "${data.name}" updated locally.`);
     } else {
-      // Create new
       const newPolicy: SecurityPolicy = {
         id: data.id || `pol-${Date.now()}`,
-        name: data.name || 'New Policy',
+        name: data.name || 'Sandbox Policy',
         version: data.version || 'v1.0.0',
         status: data.status || 'Active',
-        description: data.description || 'Custom security policy ruleset',
+        description: data.description || 'Custom sandbox simulation ruleset',
         assignedAgentNames: [],
-        lastUpdated: 'Just now',
+        lastUpdated: 'Sandbox Created',
         lastUpdatedTimestamp: Date.now(),
         rules: data.rules || {
           allowedTools: ['read_web'],
@@ -190,7 +278,7 @@ export const PoliciesView: React.FC = () => {
             version: data.version || 'v1.0.0',
             date: 'Today',
             author: 'Admin',
-            description: 'Initial policy creation',
+            description: 'Local sandbox policy trial',
             isCurrent: true,
           },
         ],
@@ -198,7 +286,7 @@ export const PoliciesView: React.FC = () => {
       };
       setPolicies((prev) => [newPolicy, ...prev]);
       setSelectedPolicy(newPolicy);
-      showToast(`Policy "${newPolicy.name}" created successfully.`);
+      showToast(`Sandbox Policy "${newPolicy.name}" created locally.`);
     }
   };
 
@@ -212,12 +300,25 @@ export const PoliciesView: React.FC = () => {
         </div>
       )}
 
+      {/* Status Indicator Banner */}
+      <div className="flex items-center justify-between pb-1.5">
+        <span
+          className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
+            isLive
+              ? 'bg-[#153e28] text-[#4ade80] border-[#1b6d39]'
+              : 'bg-[#2b2559] text-[#c084fc] border-[#3e3478]'
+          }`}
+        >
+          <span className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-[#4ade80]' : 'bg-[#c084fc]'}`} />
+          {isLive ? 'LIVE POLICIES (Enforced by Engine)' : 'DEMO POLICIES (Offline Dataset)'}
+        </span>
+      </div>
+
       {/* 1. PAGE HEADER */}
       <PolicyPageHeader
         activeMainTab={activeMainTab}
         onSelectMainTab={(tab) => {
           setActiveMainTab(tab);
-          // Leaving the Policies tab closes any open policy portal
           if (tab === 'Agents') {
             cancelCloseTimer();
             setSelectedPolicy(null);
@@ -230,7 +331,7 @@ export const PoliciesView: React.FC = () => {
       {/* 2. BODY CONTENT */}
       {activeMainTab === 'Policies' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start mt-1">
-          {/* LEFT COLUMN: KPIS + TOOLBAR + TABLE — expands when the portal is closed */}
+          {/* LEFT COLUMN: KPIS + TOOLBAR + TABLE */}
           <div
             className={`min-w-0 flex flex-col transition-all duration-300 ${
               selectedPolicy ? 'lg:col-span-8' : 'lg:col-span-12'
@@ -267,7 +368,7 @@ export const PoliciesView: React.FC = () => {
             />
           </div>
 
-          {/* RIGHT COLUMN: ANIMATED POLICY DETAIL PORTAL (4 OF 12 COLS) */}
+          {/* RIGHT COLUMN: ANIMATED POLICY DETAIL PORTAL */}
           {selectedPolicy && (
             <div
               key={selectedPolicy.id}
@@ -290,6 +391,8 @@ export const PoliciesView: React.FC = () => {
         /* AGENTS TAB VIEW */
         <div className="mt-2">
           <AgentsTableView
+            pausedAgentNames={pausedAgents}
+            onTogglePause={handleTogglePause}
             onSelectPolicyByName={(pName) => {
               const matched = policies.find((p) => p.name === pName);
               if (matched) {
@@ -308,10 +411,7 @@ export const PoliciesView: React.FC = () => {
             isDetailClosing ? 'portal-backdrop-exit' : 'portal-backdrop-enter'
           }`}
         >
-          <div
-            className="fixed inset-0"
-            onClick={handleCloseDetails}
-          />
+          <div className="fixed inset-0" onClick={handleCloseDetails} />
           <div
             className={`relative w-full max-w-md h-full z-10 ${
               isDetailClosing ? 'portal-drawer-exit' : 'portal-drawer-enter'

@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { TopNavigation } from './components/TopNavigation';
 import { DashboardHeader } from './components/DashboardHeader';
 import { KpiSection } from './components/KpiSection';
-import { SecurityActivityChart } from './components/SecurityActivityChart';
+import { SecurityActivityChart, type DayData } from './components/SecurityActivityChart';
 import { DecisionDistribution } from './components/DecisionDistribution';
 import { RiskOverview } from './components/RiskOverview';
 import { ActiveAgentsTable } from './components/ActiveAgentsTable';
@@ -16,7 +16,8 @@ import { EventsView } from './components/events/EventsView';
 import { ReviewView } from './components/review/ReviewView';
 import { PoliciesView } from './components/policies/PoliciesView';
 import { BenchmarksView } from './components/benchmarks/BenchmarksView';
-import type { Agent, SecurityEvent, AttentionItem, AlertNotification } from './types';
+import type { Agent, SecurityEvent, AttentionItem, AlertNotification, DecisionType } from './types';
+import { apiClient, type ApiOverviewStats, type ApiEventItem } from './api/client';
 
 export function App() {
   const getInitialTab = () => {
@@ -46,6 +47,12 @@ export function App() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Live dashboard state
+  const [overviewStats, setOverviewStats] = useState<ApiOverviewStats | null>(null);
+  const [liveEvents, setLiveEvents] = useState<SecurityEvent[] | null>(null);
+  const [liveAgents, setLiveAgents] = useState<Agent[] | null>(null);
+  const [activityData, setActivityData] = useState<DayData[] | null>(null);
+
   const handleSelectTab = (tab: string) => {
     setCurrentTab(tab);
     if (typeof window !== 'undefined') {
@@ -59,8 +66,141 @@ export function App() {
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<SecurityEvent | null>(null);
 
-  // Active Alert Notification (defaults to null on initial load to match Reference A)
+  // Active Alert Notification
   const [activeAlert, setActiveAlert] = useState<AlertNotification | null>(null);
+
+  // Derive daily activity chart from real event timestamps
+  const computeActivityFromEvents = (items: ApiEventItem[]): DayData[] | null => {
+    if (!items || items.length === 0) return null;
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const buckets = new Map<string, { allowed: number; review: number; blocked: number }>();
+    days.forEach((d) => buckets.set(d, { allowed: 0, review: 0, blocked: 0 }));
+
+    items.forEach((item) => {
+      const date = new Date(item.timestamp);
+      if (!isNaN(date.getTime())) {
+        const dName = days[date.getDay()];
+        const entry = buckets.get(dName) || { allowed: 0, review: 0, blocked: 0 };
+        if (item.decision === 'ALLOW') entry.allowed++;
+        else if (item.decision === 'REVIEW') entry.review++;
+        else entry.blocked++;
+        buckets.set(dName, entry);
+      }
+    });
+
+    const orderedDays = ['Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun', 'Mon'];
+    return orderedDays.map((day) => ({
+      day,
+      allowed: buckets.get(day)?.allowed || 0,
+      review: buckets.get(day)?.review || 0,
+      blocked: buckets.get(day)?.blocked || 0,
+    }));
+  };
+
+  const fetchDashboardData = useCallback(async () => {
+    try {
+      const [statsRes, eventsRes, agentsRes] = await Promise.allSettled([
+        apiClient.getOverview(),
+        apiClient.getEvents({ limit: 20 }),
+        apiClient.getAgents(),
+      ]);
+
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setOverviewStats(statsRes.value);
+      }
+
+      if (eventsRes.status === 'fulfilled' && eventsRes.value?.events) {
+        const rawEvents = eventsRes.value.events;
+        const mapped: SecurityEvent[] = rawEvents.slice(0, 4).map((e) => {
+          const dec: DecisionType =
+            e.decision === 'ALLOW' ? 'Allowed' : e.decision === 'REVIEW' ? 'Review' : 'Blocked';
+          return {
+            id: `evt-${e.id}`,
+            agent: e.agent,
+            action: e.tool,
+            decision: dec,
+            riskScore: Math.round(e.risk_score || 0),
+            timestamp: e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : 'Recently',
+            payloadSummary: JSON.stringify(e.arguments || {}),
+            reason: e.reasons?.[0] || 'Enforced by runtime security policy.',
+          };
+        });
+        if (mapped.length > 0) {
+          setLiveEvents(mapped);
+          const derived = computeActivityFromEvents(rawEvents);
+          if (derived && derived.some((d) => d.allowed > 0 || d.review > 0 || d.blocked > 0)) {
+            setActivityData(derived);
+          }
+        }
+      }
+
+      if (agentsRes.status === 'fulfilled' && agentsRes.value?.paused_agents) {
+        const paused = agentsRes.value.paused_agents;
+        setLiveAgents((prev) => {
+          const base = prev || [
+            {
+              id: 'research-agent',
+              name: 'research-agent',
+              status: 'Active',
+              policy: 'Research v2',
+              events7d: 1248,
+              blockedCount: 142,
+              blockedRate: '11.4%',
+              runtime: 'Python LangChain v0.2',
+              lastActive: 'Just now',
+              description: 'Web crawler and market intelligence gathering autonomous agent.',
+            },
+            {
+              id: 'ops-agent',
+              name: 'ops-agent',
+              status: 'Active',
+              policy: 'Operations v1',
+              events7d: 973,
+              blockedCount: 118,
+              blockedRate: '12.1%',
+              runtime: 'Go Agent Daemon v1.4',
+              lastActive: '2m ago',
+              description: 'Infrastructure automation and server health diagnostics.',
+            },
+            {
+              id: 'data-agent',
+              name: 'data-agent',
+              status: 'Active',
+              policy: 'Data Access v3',
+              events7d: 840,
+              blockedCount: 116,
+              blockedRate: '13.8%',
+              runtime: 'Node.js Agent SDK v3.1',
+              lastActive: '8m ago',
+              description: 'Internal analytical data query agent with read-only sandbox.',
+            },
+            {
+              id: 'email-agent',
+              name: 'email-agent',
+              status: 'Paused',
+              policy: 'Restricted v1',
+              events7d: 421,
+              blockedCount: 53,
+              blockedRate: '12.6%',
+              runtime: 'Python Autogen v0.4',
+              lastActive: '34m ago',
+              description: 'Outbound dispatch agent paused due to high risk score anomaly.',
+            },
+          ];
+          return base.map((ag) => ({
+            ...ag,
+            status: paused.includes(ag.name) ? 'Paused' : 'Active',
+          }));
+        });
+      }
+    } catch {
+      // Offline fallback preserved
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchDashboardData();
+  }, [fetchDashboardData]);
 
   // Global CMD + K shortcut
   useEffect(() => {
@@ -74,19 +214,18 @@ export function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     setIsRefreshing(true);
-    setTimeout(() => {
-      setIsRefreshing(false);
-      setActiveAlert({
-        id: `alert-${Date.now()}`,
-        agent: 'email-agent',
-        reason: 'Outbound volume threshold exceeded under Restricted v1 policy.',
-        riskScore: 68,
-        severity: 'warning',
-        timestamp: 'Just now',
-      });
-    }, 800);
+    await fetchDashboardData();
+    setIsRefreshing(false);
+    setActiveAlert({
+      id: `alert-${Date.now()}`,
+      agent: 'email-agent',
+      reason: 'Outbound volume threshold exceeded under Restricted v1 policy.',
+      riskScore: 68,
+      severity: 'warning',
+      timestamp: 'Just now',
+    });
   };
 
   const handleAttentionSelect = (item: AttentionItem) => {
@@ -128,7 +267,7 @@ export function App() {
         onCloseMobile={() => setIsMobileMenuOpen(false)}
       />
 
-      {/* 2. MAIN VIEW CONTAINER (Dynamic offset matching sidebar collapsed/expanded state) */}
+      {/* 2. MAIN VIEW CONTAINER */}
       <div
         className={`flex-1 flex flex-col min-w-0 transition-all duration-300 ease-in-out ${
           isSidebarCollapsed ? 'lg:pl-[72px]' : 'lg:pl-[272px]'
@@ -167,16 +306,36 @@ export function App() {
             />
 
             {/* KPI Section: 4 Metric Cards with Sparklines */}
-            <KpiSection />
+            <KpiSection
+              stats={
+                overviewStats
+                  ? {
+                      total: overviewStats.total_evaluated,
+                      allowed: overviewStats.allow_count,
+                      review: overviewStats.review_count,
+                      blocked: overviewStats.block_count,
+                    }
+                  : null
+              }
+            />
 
             {/* Middle Analytics Grid: 3 Panels */}
-            {/* Security Activity (approx 48%), Decision Distribution (26%), Risk Overview (26%) */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
               <div className="lg:col-span-6 xl:col-span-6 flex flex-col">
-                <SecurityActivityChart />
+                <SecurityActivityChart activityData={activityData} />
               </div>
               <div className="lg:col-span-3 xl:col-span-3 flex flex-col">
-                <DecisionDistribution />
+                <DecisionDistribution
+                  counts={
+                    overviewStats
+                      ? {
+                          allowed: overviewStats.allow_count,
+                          review: overviewStats.review_count,
+                          blocked: overviewStats.block_count,
+                        }
+                      : null
+                  }
+                />
               </div>
               <div className="lg:col-span-3 xl:col-span-3 flex flex-col">
                 <RiskOverview />
@@ -184,10 +343,10 @@ export function App() {
             </div>
 
             {/* Bottom Grid: 3 Panels */}
-            {/* Active Agents (approx 48%), Attention Required (26%), Recent Events (26%) */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
               <div className="lg:col-span-6 xl:col-span-6 flex flex-col">
                 <ActiveAgentsTable
+                  agents={liveAgents || undefined}
                   onSelectAgent={setSelectedAgent}
                   onViewAll={() => setIsSearchOpen(true)}
                 />
@@ -197,6 +356,7 @@ export function App() {
               </div>
               <div className="lg:col-span-3 xl:col-span-3 flex flex-col">
                 <RecentEventsList
+                  events={liveEvents || undefined}
                   onSelectEvent={setSelectedEvent}
                   onViewAll={() => setIsSearchOpen(true)}
                 />

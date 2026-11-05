@@ -13,13 +13,15 @@ import type { SecurityEvent } from '../types';
 interface RecentEventsListProps {
   onSelectEvent: (event: SecurityEvent) => void;
   onViewAll: () => void;
+  events?: SecurityEvent[];
 }
 
 export const RecentEventsList: React.FC<RecentEventsListProps> = ({
   onSelectEvent,
   onViewAll,
+  events: customEvents,
 }) => {
-  const events: SecurityEvent[] = [
+  const defaultEvents: SecurityEvent[] = [
     {
       id: 'evt-1',
       agent: 'research-agent',
@@ -62,6 +64,8 @@ export const RecentEventsList: React.FC<RecentEventsListProps> = ({
     },
   ];
 
+  const events = customEvents && customEvents.length > 0 ? customEvents : defaultEvents;
+
   const getStatusIcon = (decision: SecurityEvent['decision']) => {
     switch (decision) {
       case 'Allowed':
@@ -97,7 +101,7 @@ export const RecentEventsList: React.FC<RecentEventsListProps> = ({
 
       {/* Event Items */}
       <div className="flex flex-col justify-between gap-1.5 my-auto py-1">
-        {events.map((evt) => (
+        {events.slice(0, 4).map((evt) => (
           <button
             key={evt.id}
             onClick={() => onSelectEvent(evt)}
