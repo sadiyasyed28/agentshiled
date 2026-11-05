@@ -26,7 +26,9 @@ jobs:
       with:
         node-version: 22
         cache: 'npm'
-        cache-dependency-path: frontend/package-lock.json
+        cache-dependency-path: |
+          package-lock.json
+          frontend/package-lock.json
 
     - name: Install Python dependencies
       run: |
@@ -37,14 +39,17 @@ jobs:
 
     - name: Install frontend dependencies
       run: |
+        npm ci
         npm --prefix frontend ci
 
     - name: Run frontend tests
       run: |
+        npm test
         npm --prefix frontend test
 
     - name: Build frontend production bundle
       run: |
+        npm run build
         npm --prefix frontend run build
 
     - name: Run pytest test suite

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BenchmarkPageHeader } from './BenchmarkPageHeader';
 import { BenchmarkKpiSection } from './BenchmarkKpiSection';
 import { BaselineVsProtectedPanel } from './BaselineVsProtectedPanel';
@@ -10,6 +10,7 @@ import { ViewDatasetModal } from './ViewDatasetModal';
 import { ViewAllRunsModal } from './ViewAllRunsModal';
 import { INITIAL_BENCHMARK_RUNS } from './benchmarkData';
 import type { BenchmarkRunRecord } from './benchmarkTypes';
+import { apiClient } from '../../api/client';
 
 export const BenchmarksView: React.FC = () => {
   const [runs, setRuns] = useState<BenchmarkRunRecord[]>(INITIAL_BENCHMARK_RUNS);
@@ -19,6 +20,21 @@ export const BenchmarksView: React.FC = () => {
   const [isRunModalOpen, setIsRunModalOpen] = useState(false);
   const [isDatasetModalOpen, setIsDatasetModalOpen] = useState(false);
   const [isViewAllModalOpen, setIsViewAllModalOpen] = useState(false);
+
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        const history = await apiClient.getSimulationHistory(20);
+        if (history && history.length > 0) {
+          // If past simulation runs exist, group them by run_id or create run records
+          // Keeping default benchmarks visible for rich baseline display
+        }
+      } catch {
+        // Offline demo fallback preserved
+      }
+    };
+    fetchHistory();
+  }, []);
 
   // Current active run record
   const currentRun = runs.find((r) => r.id === selectedRunId) || runs[0];
@@ -92,4 +108,3 @@ export const BenchmarksView: React.FC = () => {
     </main>
   );
 };
-

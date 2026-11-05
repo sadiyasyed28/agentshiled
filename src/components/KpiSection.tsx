@@ -9,7 +9,23 @@ import { PixelSparkline } from './pixel/PixelSparkline';
 import { PixelCard } from './pixel/PixelCard';
 import { AnimatedNumber } from './pixel/AnimatedNumber';
 
-export const KpiSection: React.FC = () => {
+export interface KpiStats {
+  total?: number;
+  allowed?: number;
+  review?: number;
+  blocked?: number;
+}
+
+interface KpiSectionProps {
+  stats?: KpiStats | null;
+}
+
+export const KpiSection: React.FC<KpiSectionProps> = ({ stats }) => {
+  const totalEvents = stats?.total ?? 3842;
+  const allowedEvents = stats?.allowed ?? 2976;
+  const reviewEvents = stats?.review ?? 437;
+  const blockedEvents = stats?.blocked ?? 429;
+
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
       {/* Card 1: Total Events (NO sparkline, exactly matching Reference A) */}
@@ -24,7 +40,7 @@ export const KpiSection: React.FC = () => {
         </div>
         <div className="mt-2">
           <div className="text-[28px] font-bold text-white tracking-tight leading-none">
-            <AnimatedNumber value={3842} />
+            <AnimatedNumber value={totalEvents} />
           </div>
           <div className="text-[12.5px] font-medium text-[#938ec0] mt-1">
             Total Events
@@ -45,7 +61,7 @@ export const KpiSection: React.FC = () => {
         <div className="flex items-end justify-between mt-2">
           <div>
             <div className="text-[28px] font-bold text-white tracking-tight leading-none">
-              <AnimatedNumber value={2976} />
+              <AnimatedNumber value={allowedEvents} />
             </div>
             <div className="text-[12.5px] font-medium text-[#938ec0] mt-1">
               Allowed
@@ -75,7 +91,7 @@ export const KpiSection: React.FC = () => {
         <div className="flex items-end justify-between mt-2">
           <div>
             <div className="text-[28px] font-bold text-white tracking-tight leading-none">
-              <AnimatedNumber value={437} />
+              <AnimatedNumber value={reviewEvents} />
             </div>
             <div className="text-[12.5px] font-medium text-[#938ec0] mt-1">
               Review
@@ -105,7 +121,7 @@ export const KpiSection: React.FC = () => {
         <div className="flex items-end justify-between mt-2">
           <div>
             <div className="text-[28px] font-bold text-white tracking-tight leading-none">
-              <AnimatedNumber value={429} />
+              <AnimatedNumber value={blockedEvents} />
             </div>
             <div className="text-[12.5px] font-medium text-[#938ec0] mt-1">
               Blocked

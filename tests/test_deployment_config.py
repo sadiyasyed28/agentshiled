@@ -45,7 +45,8 @@ def test_vercel_json_syntax_and_route_coverage():
         config = json.load(f)
 
     assert config.get("version") == 2, "vercel.json version must be 2"
-    assert config.get("outputDirectory") == "frontend/dist", "outputDirectory must be frontend/dist"
+    assert config.get("outputDirectory") == "dist", "outputDirectory must be dist"
+    assert config.get("buildCommand") == "npm run build", "buildCommand must be npm run build"
 
     rewrites = config.get("rewrites", [])
     assert len(rewrites) >= 4, "vercel.json must declare all required API and SPA rewrites"
@@ -169,8 +170,8 @@ def test_session_manager_dedicated_session_secret(monkeypatch):
 
 def test_secrets_not_exposed_in_frontend_bundle_or_vite_env():
     """Verifies no production credentials or backend secret values appear in the built frontend bundle."""
-    dist_dir = ROOT_DIR / "frontend" / "dist"
-    assert dist_dir.exists(), "frontend/dist must exist (run npm run build)"
+    dist_dir = ROOT_DIR / "dist"
+    assert dist_dir.exists(), "dist must exist (run npm run build)"
 
     forbidden_patterns = [
         re.compile(r"demo-local-admin-secret-key-123"),
@@ -186,15 +187,17 @@ def test_secrets_not_exposed_in_frontend_bundle_or_vite_env():
                 assert not pattern.search(content), f"Sensitive pattern {pattern.pattern} leaked in {asset_file.name}"
 
     # Also verify that frontend source files only reference approved public VITE_ variables
-    frontend_src = ROOT_DIR / "frontend" / "src"
+    frontend_sources = [ROOT_DIR / "src", ROOT_DIR / "frontend" / "src"]
     vite_pattern = re.compile(r"import\.meta\.env\.(VITE_[A-Z0-9_]+)")
     approved_vite_vars = {"VITE_API_URL", "VITE_VERCEL"}
-    for src_file in frontend_src.rglob("*"):
-        if src_file.suffix in (".ts", ".tsx"):
-            code = src_file.read_text(encoding="utf-8", errors="ignore")
-            for match in vite_pattern.finditer(code):
-                var_name = match.group(1)
-                assert var_name in approved_vite_vars, f"Unauthorized VITE variable '{var_name}' found in {src_file.name}"
+    for f_src in frontend_sources:
+        if f_src.exists():
+            for src_file in f_src.rglob("*"):
+                if src_file.suffix in (".ts", ".tsx"):
+                    code = src_file.read_text(encoding="utf-8", errors="ignore")
+                    for match in vite_pattern.finditer(code):
+                        var_name = match.group(1)
+                        assert var_name in approved_vite_vars, f"Unauthorized VITE variable '{var_name}' found in {src_file.name}"
 
 
 def test_vercel_ephemeral_storage_path_derivation(monkeypatch):
