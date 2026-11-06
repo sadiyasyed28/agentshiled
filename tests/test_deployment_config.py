@@ -343,3 +343,42 @@ def test_gemini_mock_fallback_transparency_and_non_override(monkeypatch):
     assert auth_res.json()["decision"] == "BLOCK"
     assert auth_res.json()["allowed"] is False
 
+
+def test_postgresql_driver_importable_and_declared_in_packaging():
+    """Smoke test: verifies PostgreSQL driver is importable and declared in all packaging manifests."""
+    from agentshield.storage.config import check_driver_available
+
+    has_driver, driver_name = check_driver_available()
+    assert has_driver, "PostgreSQL driver must be installed and detected"
+    assert driver_name in ("psycopg", "psycopg2"), f"Expected psycopg or psycopg2, got {driver_name}"
+
+    if driver_name == "psycopg":
+        import psycopg
+        assert hasattr(psycopg, "connect"), "psycopg driver must provide connect()"
+
+    # Verify dependency declarations in packaging files
+    root_req = (ROOT_DIR / "requirements.txt").read_text(encoding="utf-8")
+    assert "psycopg" in root_req, "root requirements.txt must declare psycopg[binary]"
+
+    api_req = (ROOT_DIR / "api" / "requirements.txt").read_text(encoding="utf-8")
+    assert "psycopg" in api_req, "api/requirements.txt must declare psycopg[binary]"
+
+    pyproject_text = (ROOT_DIR / "pyproject.toml").read_text(encoding="utf-8")
+    assert "psycopg" in pyproject_text, "pyproject.toml must declare psycopg[binary]"
+
+
+def test_postgresql_driver_missing_diagnostic_in_production(monkeypatch):
+    """Verifies that selecting PostgreSQL without an installed driver fails closed with clear diagnostic error."""
+    from unittest.mock import patch
+    from agentshield.storage.config import ConfigurationError
+
+    monkeypatch.setenv("AGENTSHIELD_DATABASE_URL", "postgresql://user:pass@localhost:5432/db")
+
+    with patch("agentshield.storage.config.check_driver_available", return_value=(False, None)):
+        with patch("agentshield.storage.connection.check_driver_available", return_value=(False, None)):
+            with pytest.raises(ConfigurationError) as exc_info:
+                create_app()
+
+            msg = str(exc_info.value)
+            assert "no PostgreSQL driver" in msg
+            assert "psycopg" in msg
