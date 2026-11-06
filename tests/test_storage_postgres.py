@@ -46,6 +46,13 @@ class MockPostgresCursor:
         self._returning_row: Optional[Any] = None
 
     def execute(self, query: str, params: Optional[Any] = None) -> "MockPostgresCursor":
+        # Check if transaction was previously aborted by an error (mirroring PostgreSQL behavior)
+        if self._conn_wrapper.is_aborted:
+            import psycopg.errors
+            raise psycopg.errors.InFailedSqlTransaction(
+                "current transaction is aborted, commands ignored until end of transaction block"
+            )
+
         # Handle advisory lock simulation outside engine.lock to prevent deadlock
         if "pg_advisory_xact_lock" in query:
             if not self._conn_wrapper.holds_advisory:
@@ -60,24 +67,45 @@ class MockPostgresCursor:
             clean_q = clean_q.replace("RETURNING id;", "")  # Handled via lastrowid if needed
             clean_q = clean_q.replace("%s", "?")
 
-            if "RETURNING" in query.upper() and "INSERT" in query.upper():
-                # Execute insert
+            # Handle PostgreSQL ALTER TABLE ... ADD COLUMN IF NOT EXISTS on SQLite
+            alter_match = re.search(
+                r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+([^;]+)",
+                clean_q,
+                re.IGNORECASE,
+            )
+            if alter_match:
+                table_name = alter_match.group(1)
+                col_name = alter_match.group(2)
+                col_type = alter_match.group(3)
+                self._cur.execute(f"PRAGMA table_info({table_name});")
+                existing_cols = {row[1] for row in self._cur.fetchall()}
+                if col_name not in existing_cols:
+                    clean_q = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type};"
+                else:
+                    return self
+
+            try:
+                if "RETURNING" in query.upper() and "INSERT" in query.upper():
+                    # Execute insert
+                    if params is not None:
+                        self._cur.execute(clean_q, params)
+                    else:
+                        self._cur.execute(clean_q)
+                    inserted_id = self._cur.lastrowid
+                    # Emulate RETURNING id
+                    self._returning_row = (inserted_id,)
+                    return self
+                else:
+                    self._returning_row = None
+
                 if params is not None:
                     self._cur.execute(clean_q, params)
                 else:
                     self._cur.execute(clean_q)
-                inserted_id = self._cur.lastrowid
-                # Emulate RETURNING id
-                self._returning_row = (inserted_id,)
                 return self
-            else:
-                self._returning_row = None
-
-            if params is not None:
-                self._cur.execute(clean_q, params)
-            else:
-                self._cur.execute(clean_q)
-            return self
+            except Exception:
+                self._conn_wrapper.is_aborted = True
+                raise
 
     def fetchone(self) -> Any:
         with self._engine.lock:
@@ -107,6 +135,7 @@ class MockPostgresConnection:
         self._raw_conn = raw_conn
         self._engine = engine
         self.holds_advisory = False
+        self.is_aborted = False
         self._sp_id = f"sp_{id(self)}_{int(time.time() * 1000000)}"
         with self._engine.lock:
             self._raw_conn.execute(f"SAVEPOINT {self._sp_id}")
@@ -115,6 +144,11 @@ class MockPostgresConnection:
         return MockPostgresCursor(self)
 
     def commit(self) -> None:
+        if self.is_aborted:
+            import psycopg.errors
+            raise psycopg.errors.InFailedSqlTransaction(
+                "current transaction is aborted, commands ignored until end of transaction block"
+            )
         with self._engine.lock:
             try:
                 self._raw_conn.execute(f"RELEASE {self._sp_id}")
@@ -127,6 +161,7 @@ class MockPostgresConnection:
             self._engine.advisory_lock.release()
 
     def rollback(self) -> None:
+        self.is_aborted = False
         with self._engine.lock:
             try:
                 self._raw_conn.execute(f"ROLLBACK TO {self._sp_id}")
@@ -538,6 +573,131 @@ def test_postgres_schema_migrations_and_lifecycle():
         assert cur.fetchone() is not None
 
 
+def test_postgres_migration_duplicate_column_idempotent():
+    """Regression test: verifies migration 003 runs cleanly when columns already exist from migration 001."""
+    engine = MockPostgresEngine()
+    cm = PostgresConnectionManager(dsn="postgresql://m:m@lh/db", connection_factory=engine.get_connection)
+    mgr = MigrationManager(cm)
+
+    # 1. Run all migrations once (fresh init: migration 001 creates audit_logs with correlation_id/trace_id)
+    applied = mgr.run_migrations()
+    assert applied == 3
+    assert mgr.get_applied_versions() == [1, 2, 3]
+
+    # 2. Directly invoke migration 003 again on the existing schema inside a transaction
+    from agentshield.storage.migrations import _migration_003_audit_correlation_tracing
+    with cm.get_connection() as conn:
+        cur = conn.cursor()
+        _migration_003_audit_correlation_tracing(cur)
+        # Verify transaction remains valid: this would raise InFailedSqlTransaction if aborted
+        cur.execute("SELECT COUNT(*) FROM audit_logs;")
+        assert cur.fetchone() is not None
+
+    # 3. Running run_migrations() again is idempotent
+    assert mgr.run_migrations() == 0
+
+
+def test_postgres_migration_legacy_schema_without_columns():
+    """Regression test: verifies migration 003 successfully upgrades legacy schema missing correlation/trace columns."""
+    engine = MockPostgresEngine()
+    cm = PostgresConnectionManager(dsn="postgresql://m:m@lh/db", connection_factory=engine.get_connection)
+
+    # Simulate legacy database: create audit_logs without correlation_id and trace_id
+    with cm.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name VARCHAR(128) NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                agent VARCHAR(128) NOT NULL,
+                tool VARCHAR(128) NOT NULL,
+                arguments TEXT NOT NULL,
+                decision VARCHAR(32) NOT NULL,
+                allowed INTEGER NOT NULL,
+                reasons TEXT NOT NULL,
+                rules_triggered TEXT NOT NULL,
+                risk_score DOUBLE PRECISION NOT NULL,
+                severity VARCHAR(32) NOT NULL,
+                risk_factors TEXT NOT NULL,
+                execution_status VARCHAR(64) NOT NULL
+            );
+        """)
+        cur.execute("INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, '001_legacy', '2026-01-01T00:00:00Z');")
+        cur.execute("INSERT INTO schema_migrations (version, name, applied_at) VALUES (2, '002_rate_limit_schema', '2026-01-01T00:00:00Z');")
+
+    mgr = MigrationManager(cm)
+    status_pre = mgr.get_status()
+    assert status_pre["current_version"] == 2
+    assert status_pre["migrations"][2]["applied"] is False
+
+    # Apply pending migration (only 003 pending)
+    applied = mgr.run_migrations()
+    assert applied == 1
+    assert mgr.get_applied_versions() == [1, 2, 3]
+
+    # Verify columns were added to audit_logs
+    with cm.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(audit_logs);")
+        col_names = {row[1] for row in cur.fetchall()}
+        assert "correlation_id" in col_names
+        assert "trace_id" in col_names
+
+
+def test_postgres_migration_genuine_failure_rolls_back():
+    """Regression test: verifies that genuine migration failures roll back cleanly and are not swallowed."""
+    from agentshield.storage.migrations import Migration, MIGRATIONS
+
+    engine = MockPostgresEngine()
+    cm = PostgresConnectionManager(dsn="postgresql://m:m@lh/db", connection_factory=engine.get_connection)
+    mgr = MigrationManager(cm)
+
+    # 1. Apply existing migrations 1..3
+    mgr.run_migrations()
+    assert mgr.get_applied_versions() == [1, 2, 3]
+
+    # 2. Define a failing migration that creates a partial canary table and then fails
+    def _failing_up(cursor):
+        cursor.execute("CREATE TABLE partial_canary (id INTEGER PRIMARY KEY, note TEXT);")
+        cursor.execute("THIS IS COMPLETELY INVALID SQL SYNTAX;")
+
+    bad_migration = Migration(version=4, name="004_failing_migration", up=_failing_up)
+    MIGRATIONS.append(bad_migration)
+
+    try:
+        with pytest.raises(Exception):
+            mgr.run_migrations()
+
+        # 3. Verify rollback removes partial_canary
+        with cm.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='partial_canary';")
+            assert cur.fetchone() is None, "partial_canary table should have been removed by rollback"
+
+        # 4. Verify version 4 was NOT recorded in schema_migrations
+        assert mgr.get_applied_versions() == [1, 2, 3]
+        status = mgr.get_status()
+        assert status["current_version"] == 3
+
+        # 5. Verify the connection can be used successfully afterward
+        with cm.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM audit_logs;")
+            assert cur.fetchone() is not None
+            cur.execute("CREATE TABLE post_recovery_test (id INTEGER PRIMARY KEY);")
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_recovery_test';")
+            assert cur.fetchone() is not None
+    finally:
+        MIGRATIONS.remove(bad_migration)
+
+
 def test_sqlite_to_postgres_safe_migration(tmp_path):
     """[MOCKED] Verifies safe, repeatable data migration from SQLite to PostgreSQL with hash chain verification."""
     # 1. Populate real SQLite databases
@@ -635,12 +795,26 @@ def test_sqlite_to_postgres_safe_migration(tmp_path):
 
 def test_live_postgres_instance():
     """[LIVE] Executes end-to-end against a real PostgreSQL instance if configured."""
-    live_url = os.environ.get("AGENTSHIELD_TEST_POSTGRES_URL")
+    live_url = os.environ.get("AGENTSHIELD_TEST_POSTGRES_URL") or os.environ.get("TEST_DATABASE_URL")
     if not live_url:
         pytest.skip("AGENTSHIELD_TEST_POSTGRES_URL is not set; skipping live PostgreSQL test")
 
     validate_database_url(live_url)
-    stores = create_postgres_stores(live_url)
+    cm = PostgresConnectionManager(dsn=live_url)
+    mgr = MigrationManager(cm)
+
+    # 1. Run migrations on live PostgreSQL (verifies no InFailedSqlTransaction)
+    applied = mgr.run_migrations()
+    assert isinstance(applied, int)
+    applied_versions = mgr.get_applied_versions()
+    assert 1 in applied_versions
+    assert 2 in applied_versions
+    assert 3 in applied_versions
+
+    # 2. Verify idempotency on live PostgreSQL
+    assert mgr.run_migrations() == 0
+
+    stores = create_postgres_stores(live_url, connection_manager=cm)
 
     # Live test audit write and hash verification
     dec = Decision(

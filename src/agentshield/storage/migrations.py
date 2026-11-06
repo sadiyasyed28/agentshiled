@@ -257,18 +257,9 @@ def _migration_002_rate_limit_schema(cursor: Any) -> None:
 
 def _migration_003_audit_correlation_tracing(cursor: Any) -> None:
     """Migration 003: Add correlation_id and trace_id columns and index to audit_logs."""
-    try:
-        cursor.execute("ALTER TABLE audit_logs ADD COLUMN correlation_id VARCHAR(128);")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE audit_logs ADD COLUMN trace_id VARCHAR(128);")
-    except Exception:
-        pass
-    try:
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_correlation_id ON audit_logs(correlation_id);")
-    except Exception:
-        pass
+    cursor.execute("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS correlation_id VARCHAR(128);")
+    cursor.execute("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS trace_id VARCHAR(128);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_correlation_id ON audit_logs(correlation_id);")
 
 
 # Registry of ordered schema migrations
