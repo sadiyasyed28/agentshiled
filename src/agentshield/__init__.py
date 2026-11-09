@@ -1,5 +1,11 @@
 """AgentShield core package."""
-from .shield import Shield, ExecutionResult, ExecutionStatus
+from .shield import (
+    Shield,
+    ExecutionResult,
+    ExecutionStatus,
+    ToolBlockedError,
+    ToolReviewRequiredError,
+)
 from .policy import (
     PolicyEngine,
     PolicyConfiguration,
@@ -76,6 +82,8 @@ __all__ = [
     "Shield",
     "ExecutionResult",
     "ExecutionStatus",
+    "ToolBlockedError",
+    "ToolReviewRequiredError",
     "PolicyEngine",
     "PolicyConfiguration",
     "AgentConfig",

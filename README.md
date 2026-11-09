@@ -280,6 +280,42 @@ tools:
       order_id: str
 ```
 
+### 3. Decorator-Based Tool Protection (`@shield.protect_tool`)
+
+Protect existing Python functions and methods effortlessly with `@shield.protect_tool`:
+
+```python
+from agentshield import Shield, PolicyConfiguration, ToolBlockedError, ToolReviewRequiredError
+
+shield = Shield(policy=policy)
+
+# Protect synchronous or asynchronous functions
+@shield.protect_tool(agent="support_bot")
+def lookup_order(order_id: str) -> dict:
+    return {"order_id": order_id, "status": "shipped"}
+
+@shield.protect_tool(agent="support_bot", permissions=["finance:refund"])
+def process_refund(order_id: str, amount: float) -> dict:
+    return {"refund_id": "ref_123", "amount": amount}
+
+# 1. ALLOW: Invokes the function exactly once
+result = lookup_order("ord_9901")
+
+# 2. BLOCK: Never invokes the function, raises ToolBlockedError
+try:
+    process_refund("ord_9901", amount=150.0)  # Missing permission or denied
+except ToolBlockedError as err:
+    print(f"Blocked: {err}")
+
+# 3. REVIEW: High-risk actions are enqueued and raise ToolReviewRequiredError
+try:
+    process_refund("ord_9901", amount=5000.0)
+except ToolReviewRequiredError as err:
+    print(f"Human review required: {err.review_id}")
+    # Approved by human supervisor:
+    shield.approve_review(err.review_id, approver="supervisor_1")
+```
+
 ---
 
 ## Vercel Deployment Guide

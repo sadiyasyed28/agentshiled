@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import hmac
 import inspect
@@ -5,7 +6,7 @@ import os
 import secrets
 import threading
 import time
-from typing import Any, Optional, Dict, List, Set, Tuple
+from typing import Any, Optional, Dict, List, Set, Tuple, Callable, Union
 import uuid
 from agentshield.models import (
     Action,
@@ -55,6 +56,30 @@ class ExecutionResult:
         self.execution_status = execution_status
         self.tool_result = tool_result
         self.error = error
+
+
+class ToolBlockedError(PermissionError):
+    """Raised when an invocation of a protected tool is blocked by policy or risk evaluation."""
+    def __init__(self, message: str, decision: Decision, tool_name: str, agent: str):
+        super().__init__(message)
+        self.decision = decision
+        self.tool_name = tool_name
+        self.agent = agent
+        self.reasons = list(decision.reasons)
+        self.risk_score = decision.risk_score
+
+
+class ToolReviewRequiredError(PermissionError):
+    """Raised when an invocation of a protected tool requires human approval before execution."""
+    def __init__(self, message: str, decision: Decision, tool_name: str, agent: str, review_id: Optional[str] = None):
+        super().__init__(message)
+        self.decision = decision
+        self.tool_name = tool_name
+        self.agent = agent
+        self.reasons = list(decision.reasons)
+        self.risk_score = decision.risk_score
+        self.review_id = review_id or getattr(decision, "review_id", None)
+
 
 class _ReviewQueueProxy:
     """Proxy mapping that exposes pending reviews from the persistent review store as a dict-like interface."""
@@ -343,6 +368,294 @@ class Shield:
         if not isinstance(policy, PolicyConfiguration):
             raise TypeError(f"policy must be a PolicyConfiguration instance, got {type(policy).__name__}")
         self.policy_engine = PolicyEngine(policy)
+
+    def protect_tool(
+        self,
+        func: Optional[Callable[..., Any]] = None,
+        *,
+        name: Optional[str] = None,
+        agent: Optional[str] = None,
+        permissions: Optional[List[str]] = None,
+        read_only: bool = False,
+        idempotent: bool = False,
+        guarantees_deduplication: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        raise_on_blocked: bool = True,
+    ) -> Callable[..., Any]:
+        """Decorator that wraps a tool callable with deterministic AgentShield policy enforcement.
+
+        Invariants:
+        - ALLOW: Invokes the original callable exactly once and records audit telemetry.
+        - BLOCK: Never invokes the original callable; audits failure and raises ToolBlockedError
+                 (or returns an ExecutionResult if raise_on_blocked=False).
+        - REVIEW: Never invokes the original callable before human approval; enqueues review and
+                  raises ToolReviewRequiredError (or returns an ExecutionResult).
+        - Preserves the wrapped function's signature, docstring, and metadata via functools.wraps.
+        - Supports both synchronous and asynchronous functions.
+
+        Args:
+            func: The function to decorate (when used as bare @shield.protect_tool).
+            name: Explicit tool name (defaults to func.__name__).
+            agent: Default agent identity for invocations of this tool.
+            permissions: Required or granted permissions for this tool.
+            read_only: Whether the tool performs read-only operations.
+            idempotent: Whether the tool is idempotent.
+            guarantees_deduplication: Whether the tool guarantees downstream deduplication on retries.
+            metadata: Additional metadata dictionary to attach to the registered tool.
+            raise_on_blocked: If True (default), raises ToolBlockedError/ToolReviewRequiredError on rejection.
+                              If False, returns ExecutionResult.
+
+        Returns:
+            Wrapped callable.
+        """
+        def _decorator(target_func: Callable[..., Any]) -> Callable[..., Any]:
+            tool_name = name or target_func.__name__
+
+            # Register with shield's tool registry so policy engine and reviews recognize it
+            self.registry.register(
+                name=tool_name,
+                callable_func=target_func,
+                metadata=metadata,
+                required_permissions=permissions,
+                idempotent=idempotent,
+                guarantees_deduplication=guarantees_deduplication,
+                read_only=read_only,
+            )
+
+            sig = inspect.signature(target_func)
+            param_names = set(sig.parameters.keys())
+            is_async = inspect.iscoroutinefunction(target_func)
+
+            def _prepare_call(call_args: tuple, call_kwargs: dict):
+                clean_kwargs = dict(call_kwargs)
+
+                # Extract security context arguments if passed by caller
+                caller_agent = clean_kwargs.pop("_agent", None)
+                if caller_agent is None and "agent_id" in clean_kwargs and "agent_id" not in param_names:
+                    caller_agent = clean_kwargs.pop("agent_id")
+                effective_agent = caller_agent if caller_agent is not None else (agent or "")
+
+                caller_perms = clean_kwargs.pop("_permissions", None)
+                if caller_perms is None and "permissions" in clean_kwargs and "permissions" not in param_names:
+                    caller_perms = clean_kwargs.pop("permissions")
+                effective_perms = caller_perms if caller_perms is not None else (permissions or [])
+
+                caller_key = clean_kwargs.pop("_agent_key", None)
+                caller_corr = clean_kwargs.pop("_correlation_id", None)
+                caller_trace = clean_kwargs.pop("_trace_id", None)
+
+                # Bind arguments for policy evaluation
+                try:
+                    bound = sig.bind_partial(*call_args, **clean_kwargs)
+                    bound.apply_defaults()
+                    eval_args = dict(bound.arguments)
+                except TypeError:
+                    eval_args = dict(clean_kwargs)
+                    for idx, a in enumerate(call_args):
+                        eval_args[f"arg_{idx}"] = a
+
+                # Authorize
+                decision = self.authorize(
+                    agent=effective_agent,
+                    tool=tool_name,
+                    arguments=eval_args,
+                    permissions=effective_perms,
+                    agent_key=caller_key,
+                    correlation_id=caller_corr,
+                    trace_id=caller_trace,
+                )
+
+                return effective_agent, clean_kwargs, decision
+
+            def _handle_non_allow(decision: Decision, effective_agent: str) -> Optional[ExecutionResult]:
+                policy_hash = self.policy_engine.version_hash
+                if self.audit_store:
+                    self.audit_store.log_decision(
+                        decision,
+                        decision.arguments,
+                        execution_status="not_executed",
+                        policy_version_hash=policy_hash,
+                    )
+                self._publish_security_event(
+                    agent_id=decision.agent,
+                    tool=decision.tool,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.LOW.value if decision.decision == DecisionValue.REVIEW else EventSeverity.MEDIUM.value,
+                    decision=decision.decision.value,
+                    risk_score=decision.risk_score,
+                    evidence=decision.reasons,
+                    trace_id=decision.trace_id,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "not_executed", "arguments": decision.arguments},
+                )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("not_executed", duration_ms=0.0)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=decision.agent,
+                        tool=decision.tool,
+                        status="not_executed",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=0.0,
+                        arguments=decision.arguments,
+                    )
+
+                if decision.decision == DecisionValue.REVIEW:
+                    rev_id = getattr(decision, "review_id", None)
+                    if raise_on_blocked:
+                        raise ToolReviewRequiredError(
+                            f"Tool '{tool_name}' for agent '{effective_agent}' requires human review"
+                            f"{f' (review_id: {rev_id})' if rev_id else ''}",
+                            decision=decision,
+                            tool_name=tool_name,
+                            agent=effective_agent,
+                            review_id=rev_id,
+                        )
+                    return ExecutionResult(
+                        decision=decision,
+                        execution_status=ExecutionStatus.NOT_EXECUTED,
+                        tool_result=None,
+                    )
+
+                # BLOCK
+                if raise_on_blocked:
+                    reasons_str = "; ".join(decision.reasons) if decision.reasons else "Blocked by policy"
+                    raise ToolBlockedError(
+                        f"Tool '{tool_name}' blocked for agent '{effective_agent}': {reasons_str}",
+                        decision=decision,
+                        tool_name=tool_name,
+                        agent=effective_agent,
+                    )
+                return ExecutionResult(
+                    decision=decision,
+                    execution_status=ExecutionStatus.NOT_EXECUTED,
+                    tool_result=None,
+                )
+
+            def _audit_and_log_success(decision: Decision, effective_agent: str, duration_ms: float) -> None:
+                policy_hash = self.policy_engine.version_hash
+                if self.audit_store:
+                    self.audit_store.log_decision(
+                        decision,
+                        decision.arguments,
+                        execution_status="executed",
+                        policy_version_hash=policy_hash,
+                    )
+                self._publish_security_event(
+                    agent_id=effective_agent,
+                    tool=tool_name,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.LOW.value,
+                    decision="ALLOW",
+                    risk_score=decision.risk_score,
+                    evidence=["Tool executed successfully via decorator"],
+                    trace_id=decision.trace_id,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "executed", "arguments": decision.arguments},
+                )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("executed", duration_ms=duration_ms)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=effective_agent,
+                        tool=tool_name,
+                        status="executed",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=duration_ms,
+                        arguments=decision.arguments,
+                    )
+
+            def _audit_and_log_error(decision: Decision, effective_agent: str, error_msg: str, duration_ms: float) -> None:
+                policy_hash = self.policy_engine.version_hash
+                if self.audit_store:
+                    self.audit_store.log_decision(
+                        decision,
+                        decision.arguments,
+                        execution_status="error",
+                        error=error_msg,
+                        policy_version_hash=policy_hash,
+                    )
+                self._publish_security_event(
+                    agent_id=effective_agent,
+                    tool=tool_name,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.MEDIUM.value,
+                    decision="ALLOW",
+                    risk_score=decision.risk_score,
+                    evidence=[f"Tool error: {error_msg}"],
+                    trace_id=decision.trace_id,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "error", "error": error_msg, "arguments": decision.arguments},
+                )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("error", duration_ms=duration_ms)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=effective_agent,
+                        tool=tool_name,
+                        status="error",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=duration_ms,
+                        error=error_msg,
+                        arguments=decision.arguments,
+                    )
+
+            if is_async:
+                @functools.wraps(target_func)
+                async def async_wrapper(*call_args: Any, **call_kwargs: Any) -> Any:
+                    effective_agent, clean_kwargs, decision = _prepare_call(call_args, call_kwargs)
+                    if decision.decision != DecisionValue.ALLOW or not decision.allowed:
+                        return _handle_non_allow(decision, effective_agent)
+
+                    start_exec = time.perf_counter()
+                    try:
+                        res = await target_func(*call_args, **clean_kwargs)
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_success(decision, effective_agent, duration_ms)
+                        if not raise_on_blocked:
+                            return ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
+                        return res
+                    except Exception as exc:
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_error(decision, effective_agent, str(exc), duration_ms)
+                        raise
+
+                async_wrapper.__shield_tool__ = tool_name
+                async_wrapper.__shield__ = self
+                return async_wrapper
+
+            else:
+                @functools.wraps(target_func)
+                def sync_wrapper(*call_args: Any, **call_kwargs: Any) -> Any:
+                    effective_agent, clean_kwargs, decision = _prepare_call(call_args, call_kwargs)
+                    if decision.decision != DecisionValue.ALLOW or not decision.allowed:
+                        return _handle_non_allow(decision, effective_agent)
+
+                    start_exec = time.perf_counter()
+                    try:
+                        res = target_func(*call_args, **clean_kwargs)
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_success(decision, effective_agent, duration_ms)
+                        if not raise_on_blocked:
+                            return ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
+                        return res
+                    except Exception as exc:
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_error(decision, effective_agent, str(exc), duration_ms)
+                        raise
+
+                sync_wrapper.__shield_tool__ = tool_name
+                sync_wrapper.__shield__ = self
+                return sync_wrapper
+
+        if func is not None:
+            return _decorator(func)
+        return _decorator
+
+    tool = protect_tool
 
     def _audit_action(
         self,
@@ -1186,6 +1499,7 @@ class Shield:
             )
             # Queue for approval with expires_at timestamp
             review_id = f"rev_{uuid.uuid4().hex[:10]}"
+            dec.review_id = review_id
             now = time.time()
             idempotency_key = None
             if isinstance(action.arguments, dict):
@@ -1530,6 +1844,7 @@ class Shield:
         arguments: Optional[Any] = None,
         trace_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        review_id: Optional[str] = None,
     ) -> Decision:
         return Decision(
             allowed=allowed,
@@ -1542,4 +1857,5 @@ class Shield:
             arguments=arguments,
             trace_id=trace_id,
             correlation_id=correlation_id,
+            review_id=review_id,
         )

@@ -20,6 +20,7 @@ class Decision:
     arguments: Optional[Any] = None
     trace_id: Optional[str] = None
     correlation_id: Optional[str] = None
+    review_id: Optional[str] = None
     
     def __post_init__(self):
         if not isinstance(self.allowed, bool):
