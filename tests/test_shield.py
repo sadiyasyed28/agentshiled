@@ -169,7 +169,7 @@ def test_review_approval_queue_and_double_approval():
 
 def test_review_queue_expiry():
     store = SQLiteAuditStore(db_path=":memory:")
-    shield = Shield(audit_store=store, review_ttl_seconds=0.01)
+    shield = Shield(audit_store=store, review_ttl_seconds=0.20)
     shield.registry.register("refund_order", lambda args: {"refunded": True})
 
     from agentshield.policy.rules import PolicyConfiguration, AgentConfig, ToolRule
@@ -181,11 +181,12 @@ def test_review_queue_expiry():
 
     dec_review = shield.authorize(agent="manager", tool="refund_order", arguments={"amount": 2000})
     assert dec_review.decision == DecisionValue.REVIEW
-    rev_id = list(shield._review_queue.keys())[0]
+    assert dec_review.review_id is not None
+    rev_id = dec_review.review_id
 
     # Sleep slightly past TTL
     import time
-    time.sleep(0.02)
+    time.sleep(0.25)
 
     # Queue should be empty and item expired
     assert len(shield.get_review_queue()) == 0

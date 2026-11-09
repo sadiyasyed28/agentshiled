@@ -378,6 +378,78 @@ except ToolReviewRequiredError as err:
 When an action is flagged for `REVIEW`, the request arguments are normalized, validated, and frozen into the persistent `ReviewStore`.
 Upon approval via `shield.approve_review(review_id, approver=...)`, AgentShield retrieves the frozen arguments from the store and executes the underlying tool via its registered callable exactly once. Subsequent approval attempts fail closed (at-most-once initiation). For async-only tools approved in synchronous review contexts, AgentShield executes via safe event loop delegation.
 
+### 5. CrewAI Integration (`agentshield[crewai]`)
+
+AgentShield provides a security adapter for CrewAI tools (`crewai.tools.BaseTool` subclasses and custom callables).
+
+#### Installation
+```bash
+pip install "agentshield[crewai]"
+```
+Supported CrewAI versions: `crewai>=0.28.0` (for Python < 3.14). The core `agentshield` package does not depend on CrewAI; all integration imports are lazy.
+
+#### Usage
+```python
+from crewai.tools import BaseTool
+from pydantic import BaseModel, Field
+from agentshield import Shield, PolicyConfiguration, ToolBlockedError, ToolReviewRequiredError
+
+shield = Shield(policy=policy)
+
+class WireTransferInput(BaseModel):
+    to_account: str = Field(description="Recipient account")
+    amount: float = Field(description="Wire amount")
+
+class WireTransferTool(BaseTool):
+    name: str = "wire_transfer"
+    description: str = "Execute an institutional wire transfer."
+    args_schema: type[BaseModel] = WireTransferInput
+
+    def _run(self, to_account: str, amount: float) -> dict:
+        return {"to_account": to_account, "amount": amount, "status": "sent"}
+
+# Wrap CrewAI tool with AgentShield runtime protection
+safe_wire = shield.protect_crewai_tool(
+    WireTransferTool(),
+    agent="financial_agent",
+    permissions=["treasury:wire"],
+)
+
+# Preserves tool metadata and CrewAI BaseTool interface:
+print(safe_wire.name)             # 'wire_transfer'
+print(safe_wire.description)      # 'Execute an institutional wire transfer.'
+print(safe_wire.args_schema)      # WireTransferInput
+print(safe_wire.result_as_answer) # False
+
+# 1. ALLOW: Invokes the underlying tool exactly once
+result = safe_wire.run(to_account="ACC-01", amount=500.0)
+
+# 2. BLOCK: Violations fail closed without invoking underlying tool
+try:
+    safe_wire.run(to_account="ACC-01", amount=25000.0)  # Exceeds max_amount
+except ToolBlockedError as err:
+    print(f"Blocked: {err}")
+
+# 3. REVIEW & Approval Workflow:
+try:
+    safe_wire.run(to_account="ACC-01", amount=5000.0)   # High risk
+except ToolReviewRequiredError as err:
+    print(f"Enqueued for review: {err.review_id}")
+    # Tool was NOT executed prior to approval.
+    approval = shield.approve_review(err.review_id, approver="security_officer")
+    print(approval.tool_result)  # Executes tool once with validated frozen arguments
+
+# 4. Async Execution:
+# Supported natively via await safe_wire.arun(...) / _arun(...)
+```
+
+#### CrewAI Invariants & Security Guarantees
+- **ALLOW**: Underlying tool `run()`, `_run()`, `arun()`, or `_arun()` executes exactly once per authorized invocation.
+- **BLOCK**: Policy violations, unknown tools, unauthorized agents, or destination mismatches fail closed immediately with zero tool invocations.
+- **REVIEW**: Elevated risk triggers human approval queue. The underlying tool never executes prior to approval.
+- **Frozen Arguments & At-Most-Once Approval**: Arguments are validated and frozen at proposal time; approvals execute using those exact frozen values. Repeated approvals fail closed.
+- **Exception Safety**: Internal errors within underlying tools are audited with status `error` or `timeout` and re-raised without retry loops bypassing security checks.
+
 ---
 
 ## Vercel Deployment Guide

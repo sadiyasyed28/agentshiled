@@ -159,6 +159,8 @@ __all__ = [
     "ConfigValidationResult",
     "AgentShieldTool",
     "protect_langchain_tool",
+    "AgentShieldCrewAITool",
+    "protect_crewai_tool",
 ]
 
 
@@ -166,5 +168,8 @@ def __getattr__(name: str):
     """Lazy import handler for optional integrations."""
     if name in ("AgentShieldTool", "protect_langchain_tool"):
         from .integrations.langchain import AgentShieldTool, protect_langchain_tool
+        return locals()[name]
+    if name in ("AgentShieldCrewAITool", "protect_crewai_tool"):
+        from .integrations.crewai import AgentShieldCrewAITool, protect_crewai_tool
         return locals()[name]
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
