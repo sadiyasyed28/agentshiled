@@ -470,12 +470,15 @@ class Shield:
             def _handle_non_allow(decision: Decision, effective_agent: str) -> Optional[ExecutionResult]:
                 policy_hash = self.policy_engine.version_hash
                 if self.audit_store:
-                    self.audit_store.log_decision(
-                        decision,
-                        decision.arguments,
-                        execution_status="not_executed",
-                        policy_version_hash=policy_hash,
-                    )
+                    try:
+                        self.audit_store.log_decision(
+                            decision,
+                            decision.arguments,
+                            execution_status="not_executed",
+                            policy_version_hash=policy_hash,
+                        )
+                    except Exception:
+                        pass
                 self._publish_security_event(
                     agent_id=decision.agent,
                     tool=decision.tool,
@@ -1758,12 +1761,15 @@ class Shield:
         if decision.decision != DecisionValue.ALLOW or not decision.allowed:
             result = ExecutionResult(decision=decision, execution_status=ExecutionStatus.NOT_EXECUTED, tool_result=None)
             if self.audit_store:
-                self.audit_store.log_decision(
-                    decision,
-                    frozen_args,
-                    execution_status="not_executed",
-                    policy_version_hash=policy_hash
-                )
+                try:
+                    self.audit_store.log_decision(
+                        decision,
+                        frozen_args,
+                        execution_status="not_executed",
+                        policy_version_hash=policy_hash
+                    )
+                except Exception:
+                    pass
             self._publish_security_event(
                 agent_id=decision.agent,
                 tool=decision.tool,

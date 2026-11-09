@@ -45,6 +45,78 @@ AgentShield includes a retro 16-bit pixel-art security dashboard providing full 
 
 ---
 
+## Supported Platforms, Frameworks & Installation
+
+### Supported Python Versions
+- **Python 3.11, 3.12, 3.13**: Officially supported across all adapters and optional extras.
+- **Python 3.14**: Supported for standalone core SDK, declarative policy, decorator tool protection, and LangChain integration. (CrewAI is constrained to Python < 3.14 due to upstream binary wheel availability).
+
+### Supported Framework Versions
+- **LangChain**: `langchain-core>=0.2.0` (supports LangChain 0.2+)
+- **CrewAI**: `crewai>=0.28.0` (Python 3.11–3.13)
+
+### Installation Matrix
+
+AgentShield enforces a minimal core installation (`pydantic>=2.0` only). All integrations, servers, and cloud providers are isolated behind optional extras:
+
+```bash
+# Standalone Core SDK (Minimal dependencies: pydantic only)
+pip install agentshield
+
+# Declarative YAML Policy Configuration
+pip install "agentshield[yaml]"
+
+# LangChain Integration
+pip install "agentshield[langchain]"
+
+# CrewAI Integration
+pip install "agentshield[crewai]"
+
+# FastAPI Server & Dashboard Backend
+pip install "agentshield[server]"
+
+# Production PostgreSQL Storage Backend
+pip install "agentshield[postgres]"
+
+# Gemini AI Security Analyst Provider
+pip install "agentshield[gemini]"
+
+# Complete Production & Developer Bundle
+pip install "agentshield[all]"
+```
+
+---
+
+## Storage & Database Architecture
+
+AgentShield provides pluggable, ACID-compliant persistent storage for audit logs, human review queues, security events, analyst reports, and simulation telemetry:
+
+### 1. SQLite Storage (Default)
+- **Use Case**: Local development, standalone CLI agents, unit testing, and single-instance applications.
+- **Concurrency & Integrity**: Uses `PRAGMA journal_mode=WAL;` and `BEGIN IMMEDIATE` transactions to prevent dirty reads and ensure atomic, race-free review claims.
+- **Ledger Security**: Implements SHA-256 cryptographic hash-chaining linked to a genesis hash to verify tamper-evidence across restarts.
+- **Configuration**: Automatic zero-config fallback to local files or `:memory:`.
+
+### 2. PostgreSQL Storage (Production & Serverless)
+- **Use Case**: Multi-instance deployments, high-throughput cloud workloads, and Vercel serverless functions.
+- **Concurrency & Locking**: Employs row-level `SELECT ... FOR UPDATE` locking to guarantee atomic at-most-once tool execution across distributed workers.
+- **Schema Management**: Includes automated, advisory-locked schema migrations (`MigrationManager`).
+- **Configuration**: Set `AGENTSHIELD_DATABASE_URL=postgresql://user:pass@host:5432/dbname?sslmode=require` (or `DATABASE_URL`). Fails closed with diagnostic `ConfigurationError` if connection or driver is missing.
+
+---
+
+## Security Guarantees & Operational Boundaries
+
+| Guarantee | Boundary / Requirement |
+| :--- | :--- |
+| **Deterministic Authority** | Policy rules strictly evaluate to `BLOCK` or `ALLOW`. Risk scores can escalate `ALLOW` to `REVIEW` or `BLOCK`, but can never override a policy denial. |
+| **Atomic At-Most-Once Execution** | Competing supervisor approvals for the same review resolve atomically; exactly one worker executes the tool callable. Repeated or replayed approvals fail closed. |
+| **Incident Containment** | Paused agents cannot execute tools under any circumstance—including via supervisor review approval. Approvals for paused agents immediately fail closed. |
+| **Secret Redaction** | Sensitive credentials (passwords, bearer tokens, API keys, private keys) are automatically sanitized across audit stores, review arguments, and event logs. |
+| **Operational Boundaries** | Framework callbacks (e.g. LangChain `on_tool_start` or CrewAI agent loggers) run outside AgentShield's execution boundary; callers must ensure sensitive variables are not printed by external hooks. |
+
+---
+
 ## Tech Stack & Architecture
 
 - **Core SDK**: Python 3.12+ / 3.13 / 3.14 (`src/` layout, dataclasses, frozen models)

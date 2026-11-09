@@ -43,7 +43,6 @@ from .analyst import (
     SuspiciousSequence,
     LLMProvider,
     MockLLMProvider,
-    GeminiProvider,
     SecurityAnalyst,
     ReportStore,
     SQLiteReportStore,
@@ -165,11 +164,14 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Lazy import handler for optional integrations."""
+    """Lazy import handler for optional integrations and providers."""
     if name in ("AgentShieldTool", "protect_langchain_tool"):
         from .integrations.langchain import AgentShieldTool, protect_langchain_tool
         return locals()[name]
     if name in ("AgentShieldCrewAITool", "protect_crewai_tool"):
         from .integrations.crewai import AgentShieldCrewAITool, protect_crewai_tool
         return locals()[name]
+    if name == "GeminiProvider":
+        from .analyst.providers.gemini import GeminiProvider
+        return GeminiProvider
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
