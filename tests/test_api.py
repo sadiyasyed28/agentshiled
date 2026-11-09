@@ -379,3 +379,79 @@ async def test_read_only_mode_blocks_mutations(monkeypatch):
     finally:
         if os.path.exists(db_path):
             os.remove(db_path)
+
+
+@pytest.mark.anyio
+async def test_incident_agents_public_read_and_protected_mutations():
+    """Regression test: verifies GET /incident/agents and /api/incident/agents work unauthenticated,
+    while mutations still require admin credentials and respect read-only protections.
+    """
+    admin_key = "test-incident-admin-key"
+    app = create_app(audit_db_path=":memory:", admin_api_key=admin_key, read_only=False)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Both GET routes work unauthenticated and return empty paused_agents list initially
+        res_get_1 = await client.get("/incident/agents")
+        assert res_get_1.status_code == 200
+        assert res_get_1.json() == {"paused_agents": []}
+
+        res_get_2 = await client.get("/api/incident/agents")
+        assert res_get_2.status_code == 200
+        assert res_get_2.json() == {"paused_agents": []}
+
+        # 2. Pause mutation without admin credentials fails with 401
+        res_pause_unauth = await client.post("/incident/pause", json={"agent": "shopping_agent"})
+        assert res_pause_unauth.status_code == 401
+
+        res_pause_api_unauth = await client.post("/api/incident/pause", json={"agent": "shopping_agent"})
+        assert res_pause_api_unauth.status_code == 401
+
+        # 3. Unpause mutation without admin credentials fails with 401
+        res_unpause_unauth = await client.post("/incident/unpause", json={"agent": "shopping_agent"})
+        assert res_unpause_unauth.status_code == 401
+
+        res_unpause_api_unauth = await client.post("/api/incident/unpause", json={"agent": "shopping_agent"})
+        assert res_unpause_api_unauth.status_code == 401
+
+        # 4. Authenticated pause mutation succeeds
+        headers = {"x-admin-key": admin_key}
+        res_pause_auth = await client.post("/incident/pause", json={"agent": "shopping_agent"}, headers=headers)
+        assert res_pause_auth.status_code == 200
+        assert res_pause_auth.json() == {"agent": "shopping_agent", "status": "paused"}
+
+        # 5. Both unauthenticated GET routes now return the updated paused_agents list
+        res_get_paused_1 = await client.get("/incident/agents")
+        assert res_get_paused_1.status_code == 200
+        assert res_get_paused_1.json() == {"paused_agents": ["shopping_agent"]}
+
+        res_get_paused_2 = await client.get("/api/incident/agents")
+        assert res_get_paused_2.status_code == 200
+        assert res_get_paused_2.json() == {"paused_agents": ["shopping_agent"]}
+
+        # 6. Authenticated unpause mutation succeeds
+        res_unpause_auth = await client.post("/incident/unpause", json={"agent": "shopping_agent"}, headers=headers)
+        assert res_unpause_auth.status_code == 200
+        assert res_unpause_auth.json() == {"agent": "shopping_agent", "status": "active"}
+
+        # 7. Paused agents list reflects unpaused state
+        res_get_unpaused = await client.get("/api/incident/agents")
+        assert res_get_unpaused.status_code == 200
+        assert res_get_unpaused.json() == {"paused_agents": []}
+
+    # 8. Verify read-only mode prevents mutations even with valid admin credentials
+    app_ro = create_app(audit_db_path=":memory:", admin_api_key=admin_key, read_only=True)
+    transport_ro = ASGITransport(app=app_ro)
+    async with AsyncClient(transport=transport_ro, base_url="http://test") as client_ro:
+        # GET is still allowed
+        res_ro_get = await client_ro.get("/api/incident/agents")
+        assert res_ro_get.status_code == 200
+
+        # Mutations are blocked by read-only mode with 403 Forbidden
+        res_ro_pause = await client_ro.post("/incident/pause", json={"agent": "shopping_agent"}, headers=headers)
+        assert res_ro_pause.status_code == 403
+        assert "read-only mode" in res_ro_pause.json()["detail"].lower()
+
+        res_ro_unpause = await client_ro.post("/incident/unpause", json={"agent": "shopping_agent"}, headers=headers)
+        assert res_ro_unpause.status_code == 403
+        assert "read-only mode" in res_ro_unpause.json()["detail"].lower()
