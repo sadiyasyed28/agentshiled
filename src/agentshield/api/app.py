@@ -913,8 +913,7 @@ def create_app(
 
     @app.get("/incident/agents")
     @app.get("/api/incident/agents")
-    def list_agents(request: Request):
-        _verify_admin(request)
+    def list_agents():
         return {"paused_agents": sorted(list(shield._paused_agents))}
 
     @app.get("/policies", response_model=PoliciesResponse)
