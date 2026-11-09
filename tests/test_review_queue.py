@@ -164,17 +164,19 @@ def test_review_queue_expiry_persistence_and_fail_closed():
         rev_db = f_rev.name
 
     try:
-        shield_1 = _setup_review_shield(rev_db, ttl=0.05)
+        shield_1 = _setup_review_shield(rev_db, ttl=0.25)
         shield_1.registry.register("refund_order", lambda args: {"refunded": True})
 
         dec = shield_1.authorize(agent="manager", tool="refund_order", arguments={"amount": 2500})
         assert dec.decision == DecisionValue.REVIEW
-        review_id = shield_1.get_review_queue()[0]["review_id"]
+        pending = shield_1.get_review_queue()
+        assert len(pending) == 1, "Review must be pending immediately after authorization"
+        review_id = pending[0]["review_id"]
 
-        time.sleep(0.06)
+        time.sleep(0.30)
 
         del shield_1
-        shield_2 = _setup_review_shield(rev_db, ttl=0.05)
+        shield_2 = _setup_review_shield(rev_db, ttl=0.25)
         call_counts = {"count": 0}
         shield_2.registry.register("refund_order", lambda args: (call_counts.__setitem__("count", 1), {"ok": True})[1])
 
