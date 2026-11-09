@@ -12,7 +12,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-from pydantic import ConfigDict, BaseModel, Field
+from pydantic import ConfigDict, BaseModel, Field, PrivateAttr
 
 # Lazy dependency resolution for CrewAI BaseTool
 _CrewAIBaseTool = None
@@ -82,24 +82,25 @@ def _dispatch_call(entrypoint: Callable, impl: Optional[Callable], exec_args: An
         return entrypoint(exec_args)
     clean_kwargs = _clean_call_arguments(exec_args)
     check_func = impl or entrypoint
+    use_kwargs = True
+    call_dict = clean_kwargs
     try:
         sig = inspect.signature(check_func)
         params = list(sig.parameters.values())
         has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-        if has_var_kw:
-            return entrypoint(**clean_kwargs)
-        param_names = {p.name for p in params}
-        matching = {k: v for k, v in clean_kwargs.items() if k in param_names}
-        if matching or not clean_kwargs:
-            return entrypoint(**matching)
-        if len(params) == 1:
-            return entrypoint(clean_kwargs)
-        return entrypoint(**clean_kwargs)
+        if not has_var_kw:
+            param_names = {p.name for p in params}
+            matching = {k: v for k, v in clean_kwargs.items() if k in param_names}
+            if matching or not clean_kwargs:
+                call_dict = matching
+            elif len(params) == 1:
+                use_kwargs = False
     except (ValueError, TypeError):
-        try:
-            return entrypoint(**clean_kwargs)
-        except TypeError:
-            return entrypoint(clean_kwargs)
+        pass
+
+    if use_kwargs:
+        return entrypoint(**call_dict)
+    return entrypoint(clean_kwargs)
 
 
 def _get_atarget_callable(tool: Any) -> Tuple[Optional[Callable], Optional[Callable]]:
@@ -119,24 +120,25 @@ async def _adispatch_call(entrypoint: Callable, impl: Optional[Callable], exec_a
         return await entrypoint(exec_args)
     clean_kwargs = _clean_call_arguments(exec_args)
     check_func = impl or entrypoint
+    use_kwargs = True
+    call_dict = clean_kwargs
     try:
         sig = inspect.signature(check_func)
         params = list(sig.parameters.values())
         has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-        if has_var_kw:
-            return await entrypoint(**clean_kwargs)
-        param_names = {p.name for p in params}
-        matching = {k: v for k, v in clean_kwargs.items() if k in param_names}
-        if matching or not clean_kwargs:
-            return await entrypoint(**matching)
-        if len(params) == 1:
-            return await entrypoint(clean_kwargs)
-        return await entrypoint(**clean_kwargs)
+        if not has_var_kw:
+            param_names = {p.name for p in params}
+            matching = {k: v for k, v in clean_kwargs.items() if k in param_names}
+            if matching or not clean_kwargs:
+                call_dict = matching
+            elif len(params) == 1:
+                use_kwargs = False
     except (ValueError, TypeError):
-        try:
-            return await entrypoint(**clean_kwargs)
-        except TypeError:
-            return await entrypoint(clean_kwargs)
+        pass
+
+    if use_kwargs:
+        return await entrypoint(**call_dict)
+    return await entrypoint(clean_kwargs)
 
 
 class AgentShieldCrewAITool(_CrewAIBaseTool):
@@ -151,15 +153,29 @@ class AgentShieldCrewAITool(_CrewAIBaseTool):
     args_schema: Optional[Type[BaseModel]] = Field(default=None, description="Tool argument schema")
     result_as_answer: bool = Field(default=False, description="Whether tool result is the final answer")
 
-    wrapped_tool: Any = Field(..., description="Underlying CrewAI tool or callable")
+    _underlying_tool: Any = PrivateAttr(default=None)
     shield: Any = Field(..., description="AgentShield runtime instance")
     agent: Optional[str] = Field(default=None, description="Default agent identity")
     permissions: Optional[List[str]] = Field(default=None, description="Required permissions")
     correlation_id: Optional[str] = Field(default=None, description="Default correlation ID")
-    raise_on_blocked: bool = Field(default=True, description="Whether to raise on blocked decisions")
-    read_only: bool = Field(default=False, description="Whether tool is read-only")
-    idempotent: bool = Field(default=False, description="Whether tool is idempotent")
-    call_count: int = Field(default=0, description="Invocation counter for testing and auditing")
+    raise_on_blocked: bool = True
+    read_only: bool = False
+    idempotent: bool = False
+    call_count: int = 0
+
+    def __init__(self, **kwargs: Any) -> None:
+        raw_tool = kwargs.pop("wrapped_tool", None) or kwargs.pop("_underlying_tool", None)
+        super().__init__(**kwargs)
+        if raw_tool is not None:
+            self._underlying_tool = raw_tool
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ("wrapped_tool", "__wrapped__", "raw_tool", "underlying_tool"):
+            raise PermissionError(
+                f"Direct access to '{name}' is forbidden by AgentShield to prevent security policy bypass. "
+                "Invoke the protected tool directly."
+            )
+        return super().__getattr__(name)
 
     @classmethod
     def from_tool(
@@ -247,14 +263,14 @@ class AgentShieldCrewAITool(_CrewAIBaseTool):
         return effective_agent, effective_permissions, effective_correlation_id, arguments
 
     def _execute_underlying_tool(self, exec_args: Any) -> Any:
-        entry, impl = _get_target_callable(self.wrapped_tool)
+        entry, impl = _get_target_callable(self._underlying_tool)
         return _dispatch_call(entry, impl, exec_args)
 
     async def _aexecute_underlying_tool(self, exec_args: Any) -> Any:
-        a_entry, a_impl = _get_atarget_callable(self.wrapped_tool)
+        a_entry, a_impl = _get_atarget_callable(self._underlying_tool)
         if a_entry is not None:
             return await _adispatch_call(a_entry, a_impl, exec_args)
-        entry, impl = _get_target_callable(self.wrapped_tool)
+        entry, impl = _get_target_callable(self._underlying_tool)
         return await asyncio.to_thread(_dispatch_call, entry, impl, exec_args)
 
     def _log_and_audit_success(

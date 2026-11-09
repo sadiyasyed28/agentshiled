@@ -610,9 +610,20 @@ class Shield:
                     if decision.decision != DecisionValue.ALLOW or not decision.allowed:
                         return _handle_non_allow(decision, effective_agent)
 
+                    frozen_args = decision.arguments
+                    exec_args = unfreeze_value(frozen_args) if frozen_args is not None else dict(clean_kwargs)
+                    try:
+                        bound_exec = sig.bind_partial(**exec_args)
+                        bound_exec.apply_defaults()
+                        exec_call_args = bound_exec.args
+                        exec_call_kwargs = bound_exec.kwargs
+                    except (TypeError, ValueError):
+                        exec_call_args = call_args
+                        exec_call_kwargs = clean_kwargs
+
                     start_exec = time.perf_counter()
                     try:
-                        res = await target_func(*call_args, **clean_kwargs)
+                        res = await target_func(*exec_call_args, **exec_call_kwargs)
                         duration_ms = (time.perf_counter() - start_exec) * 1000.0
                         _audit_and_log_success(decision, effective_agent, duration_ms)
                         if not raise_on_blocked:
@@ -625,6 +636,11 @@ class Shield:
 
                 async_wrapper.__shield_tool__ = tool_name
                 async_wrapper.__shield__ = self
+                async_wrapper.__signature__ = sig
+                try:
+                    del async_wrapper.__wrapped__
+                except (AttributeError, KeyError):
+                    pass
                 return async_wrapper
 
             else:
@@ -634,9 +650,20 @@ class Shield:
                     if decision.decision != DecisionValue.ALLOW or not decision.allowed:
                         return _handle_non_allow(decision, effective_agent)
 
+                    frozen_args = decision.arguments
+                    exec_args = unfreeze_value(frozen_args) if frozen_args is not None else dict(clean_kwargs)
+                    try:
+                        bound_exec = sig.bind_partial(**exec_args)
+                        bound_exec.apply_defaults()
+                        exec_call_args = bound_exec.args
+                        exec_call_kwargs = bound_exec.kwargs
+                    except (TypeError, ValueError):
+                        exec_call_args = call_args
+                        exec_call_kwargs = clean_kwargs
+
                     start_exec = time.perf_counter()
                     try:
-                        res = target_func(*call_args, **clean_kwargs)
+                        res = target_func(*exec_call_args, **exec_call_kwargs)
                         duration_ms = (time.perf_counter() - start_exec) * 1000.0
                         _audit_and_log_success(decision, effective_agent, duration_ms)
                         if not raise_on_blocked:
@@ -649,6 +676,11 @@ class Shield:
 
                 sync_wrapper.__shield_tool__ = tool_name
                 sync_wrapper.__shield__ = self
+                sync_wrapper.__signature__ = sig
+                try:
+                    del sync_wrapper.__wrapped__
+                except (AttributeError, KeyError):
+                    pass
                 return sync_wrapper
 
         if func is not None:
@@ -896,6 +928,83 @@ class Shield:
         )
         if not item:
             return None
+
+        # Security invariant: verify agent is not paused
+        if self.is_agent_paused(item["agent"]):
+            err_msg = f"Agent '{item['agent']}' is currently paused; execution blocked by containment policy"
+            self.review_store.mark_executed(
+                review_id=review_id,
+                execution_state=ReviewExecutionState.FAILED.value,
+                error=err_msg,
+                worker_id=worker_id,
+            )
+            self._audit_action(
+                action_name="reject",
+                agent=item["agent"],
+                actor="system:containment",
+                decision_val=DecisionValue.BLOCK,
+                reasons=[err_msg],
+                details={
+                    "review_id": review_id,
+                    "tool": item["tool"],
+                    "status": "blocked_paused_agent",
+                }
+            )
+            return ExecutionResult(
+                decision=Decision(
+                    allowed=False,
+                    decision=DecisionValue.BLOCK,
+                    reasons=[err_msg],
+                    risk_score=95.0,
+                    severity=RiskLevel.HIGH,
+                    agent=item["agent"],
+                    tool=item["tool"],
+                    arguments=item["arguments"],
+                ),
+                execution_status=ExecutionStatus.NOT_EXECUTED,
+                tool_result=None,
+                error=err_msg,
+            )
+
+        # Security invariant: re-validate deterministic policy at execution time
+        action = Action(agent=item["agent"], tool=item["tool"], arguments=item["arguments"] or {})
+        policy_results = self.policy_engine.evaluate(action, permissions=item.get("permissions") or [])
+        failed_rules = [pr for pr in policy_results if not pr.passed]
+        if failed_rules:
+            err_msg = f"Execution blocked by deterministic policy: {'; '.join(pr.reason for pr in failed_rules)}"
+            self.review_store.mark_executed(
+                review_id=review_id,
+                execution_state=ReviewExecutionState.FAILED.value,
+                error=err_msg,
+                worker_id=worker_id,
+            )
+            self._audit_action(
+                action_name="reject",
+                agent=item["agent"],
+                actor="system:policy_enforcer",
+                decision_val=DecisionValue.BLOCK,
+                reasons=[err_msg],
+                details={
+                    "review_id": review_id,
+                    "tool": item["tool"],
+                    "status": "blocked_policy_violation",
+                }
+            )
+            return ExecutionResult(
+                decision=Decision(
+                    allowed=False,
+                    decision=DecisionValue.BLOCK,
+                    reasons=[err_msg],
+                    risk_score=95.0,
+                    severity=RiskLevel.HIGH,
+                    agent=item["agent"],
+                    tool=item["tool"],
+                    arguments=item["arguments"],
+                ),
+                execution_status=ExecutionStatus.NOT_EXECUTED,
+                tool_result=None,
+                error=err_msg,
+            )
 
         # Audit approve action
         orig_dec = item.get("decision")
@@ -1735,59 +1844,70 @@ class Shield:
                 )
             return result
 
+        executed = False
+        res = None
         try:
             # Safe execution adapter: pass a clean defensive copy to the callable
             # so the callable can freely modify its arguments without mutating the validated frozen snapshot
             # and ensure idempotency key reaches downstream tool.
             res = self._safe_execute_tool(registered_tool, arguments, idempotency_key=idempotency_key)
+            executed = True
             duration_ms = (time.perf_counter() - start_exec) * 1000.0
             result = ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
-            if self.audit_store:
-                self.audit_store.log_decision(
-                    decision,
-                    arguments,
-                    execution_status="executed",
-                    policy_version_hash=policy_hash
-                )
-            self._publish_security_event(
-                agent_id=agent,
-                tool=tool,
-                event_type=EventType.EXECUTION_OUTCOME.value,
-                severity=EventSeverity.LOW.value,
-                decision="ALLOW",
-                risk_score=decision.risk_score,
-                evidence=["Tool executed successfully"],
-                trace_id=decision.trace_id,
-                correlation_id=decision.correlation_id,
-                metadata={"execution_status": "executed", "arguments": arguments},
-            )
-            if hasattr(self, "metrics_collector") and self.metrics_collector:
-                self.metrics_collector.record_execution("executed", duration_ms=duration_ms)
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_execution(
-                    agent=agent,
+            try:
+                if self.audit_store:
+                    self.audit_store.log_decision(
+                        decision,
+                        arguments,
+                        execution_status="executed",
+                        policy_version_hash=policy_hash
+                    )
+                self._publish_security_event(
+                    agent_id=agent,
                     tool=tool,
-                    status="executed",
-                    correlation_id=decision.correlation_id,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.LOW.value,
+                    decision="ALLOW",
+                    risk_score=decision.risk_score,
+                    evidence=["Tool executed successfully"],
                     trace_id=decision.trace_id,
-                    latency_ms=duration_ms,
-                    arguments=arguments,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "executed", "arguments": arguments},
                 )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("executed", duration_ms=duration_ms)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=agent,
+                        tool=tool,
+                        status="executed",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=duration_ms,
+                        arguments=arguments,
+                    )
+            except Exception:
+                pass
             return result
         except Exception as e:
+            if executed:
+                return ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
             duration_ms = (time.perf_counter() - start_exec) * 1000.0
             err_msg = str(e)
             is_timeout = "timeout" in err_msg.lower() or "timed out" in err_msg.lower()
             status_str = "timeout" if is_timeout else "error"
             result = ExecutionResult(decision=decision, execution_status=ExecutionStatus.ERROR, tool_result=None, error=err_msg)
             if self.audit_store:
-                self.audit_store.log_decision(
-                    decision,
-                    arguments,
-                    execution_status="error",
-                    error=err_msg,
-                    policy_version_hash=policy_hash
-                )
+                try:
+                    self.audit_store.log_decision(
+                        decision,
+                        arguments,
+                        execution_status="error",
+                        error=err_msg,
+                        policy_version_hash=policy_hash
+                    )
+                except Exception:
+                    pass
             self._publish_security_event(
                 agent_id=agent,
                 tool=tool,
@@ -1847,13 +1967,20 @@ class Shield:
             execution_args["_safe_context"] = safe_context
 
         def _invoke():
+            call_fn = None
+            args_to_pass = ()
+            kwargs_to_pass = {}
             try:
                 sig = inspect.signature(registered_tool.callable_func)
                 params = list(sig.parameters.values())
                 param_names = {p.name for p in params}
                 has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
 
-                if isinstance(execution_args, dict) and params:
+                if not params:
+                    call_fn = registered_tool.callable_func
+                    args_to_pass = ()
+                    kwargs_to_pass = {}
+                elif isinstance(execution_args, dict) and params:
                     first_param = params[0].name
                     if first_param in ("args", "arguments", "payload", "data"):
                         kw = {}
@@ -1863,30 +1990,38 @@ class Shield:
                             kw["cancellation_token"] = cancellation_token
                         if (any(p.name == "idempotency_key" for p in params) or has_var_keyword) and idempotency_key:
                             kw["idempotency_key"] = idempotency_key
-                        return registered_tool.callable_func(execution_args, **kw)
+                        call_fn = registered_tool.callable_func
+                        args_to_pass = (execution_args,)
+                        kwargs_to_pass = kw
+                    else:
+                        call_kwargs = {}
+                        for k, v in execution_args.items():
+                            if k in ("_cancellation_token", "_safe_context") and not has_var_keyword and k not in param_names:
+                                continue
+                            call_kwargs[k] = v
 
-                    call_kwargs = {}
-                    for k, v in execution_args.items():
-                        if k in ("_cancellation_token", "_safe_context") and not has_var_keyword and k not in param_names:
-                            continue
-                        call_kwargs[k] = v
+                        if "cancellation_token" in param_names and "cancellation_token" not in call_kwargs:
+                            call_kwargs["cancellation_token"] = cancellation_token
+                        if "context" in param_names and "context" not in call_kwargs:
+                            call_kwargs["context"] = safe_context
 
-                    if "cancellation_token" in param_names and "cancellation_token" not in call_kwargs:
-                        call_kwargs["cancellation_token"] = cancellation_token
-                    if "context" in param_names and "context" not in call_kwargs:
-                        call_kwargs["context"] = safe_context
-
-                    if len(params) > 1 and not (
-                        len(params) == 1 and params[0].kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-                    ):
-                        return registered_tool.callable_func(**call_kwargs)
-                    elif (any(p.name == "idempotency_key" for p in params) or has_var_keyword) and idempotency_key:
-                        try:
-                            return registered_tool.callable_func(execution_args, idempotency_key=idempotency_key)
-                        except TypeError:
-                            pass
-            except (ValueError, TypeError):
+                        if (
+                            has_var_keyword
+                            or len(params) > 1
+                            or (len(params) == 1 and params[0].name in call_kwargs)
+                        ):
+                            call_fn = registered_tool.callable_func
+                            args_to_pass = ()
+                            kwargs_to_pass = call_kwargs
+                        elif (any(p.name == "idempotency_key" for p in params) or has_var_keyword) and idempotency_key:
+                            call_fn = registered_tool.callable_func
+                            args_to_pass = (execution_args,)
+                            kwargs_to_pass = {"idempotency_key": idempotency_key}
+            except Exception:
                 pass
+
+            if call_fn is not None:
+                return call_fn(*args_to_pass, **kwargs_to_pass)
 
             return registered_tool.callable_func(execution_args)
 

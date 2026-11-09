@@ -147,9 +147,9 @@ class Action:
     metadata: dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
-        if not isinstance(self.agent, str) or not self.agent:
+        if not isinstance(self.agent, str) or not self.agent.strip():
             raise ValueError("agent must be a non-empty string")
-        if not isinstance(self.tool, str) or not self.tool:
+        if not isinstance(self.tool, str) or not self.tool.strip():
             raise ValueError("tool must be a non-empty string")
         if not isinstance(self.arguments, dict):
             raise TypeError("arguments must be a dictionary")

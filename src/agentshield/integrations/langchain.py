@@ -10,7 +10,7 @@ import asyncio
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-from pydantic import ConfigDict, BaseModel
+from pydantic import ConfigDict, BaseModel, PrivateAttr
 
 try:
     from langchain_core.tools import BaseTool, StructuredTool, tool
@@ -46,7 +46,7 @@ class AgentShieldTool(BaseTool):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
 
-    wrapped_tool: BaseTool
+    _underlying_tool: Any = PrivateAttr(default=None)
     shield: Any
     agent: Optional[str] = None
     permissions: Optional[List[str]] = None
@@ -55,6 +55,20 @@ class AgentShieldTool(BaseTool):
     read_only: bool = False
     idempotent: bool = False
     call_count: int = 0
+
+    def __init__(self, **kwargs: Any) -> None:
+        raw_tool = kwargs.pop("wrapped_tool", None) or kwargs.pop("_underlying_tool", None)
+        super().__init__(**kwargs)
+        if raw_tool is not None:
+            self._underlying_tool = raw_tool
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ("wrapped_tool", "__wrapped__", "raw_tool", "underlying_tool"):
+            raise PermissionError(
+                f"Direct access to '{name}' is forbidden by AgentShield to prevent security policy bypass. "
+                "Invoke the protected tool directly."
+            )
+        return super().__getattr__(name)
 
     @classmethod
     def from_tool(
@@ -145,18 +159,18 @@ class AgentShieldTool(BaseTool):
 
     def _execute_tool_sync(self, exec_args: Any) -> Any:
         try:
-            return self.wrapped_tool.invoke(exec_args)
+            return self._underlying_tool.invoke(exec_args)
         except TypeError:
             if isinstance(exec_args, dict) and len(exec_args) == 1:
-                return self.wrapped_tool.invoke(next(iter(exec_args.values())))
+                return self._underlying_tool.invoke(next(iter(exec_args.values())))
             raise
 
     async def _execute_tool_async(self, exec_args: Any) -> Any:
         try:
-            return await self.wrapped_tool.ainvoke(exec_args)
+            return await self._underlying_tool.ainvoke(exec_args)
         except TypeError:
             if isinstance(exec_args, dict) and len(exec_args) == 1:
-                return await self.wrapped_tool.ainvoke(next(iter(exec_args.values())))
+                return await self._underlying_tool.ainvoke(next(iter(exec_args.values())))
             raise
 
     def _log_and_audit_success(
@@ -413,7 +427,12 @@ def protect_langchain_tool(
     """
     if not isinstance(tool, BaseTool):
         if callable(tool):
-            tool = StructuredTool.from_function(tool)
+            func_kwargs = {}
+            if name:
+                func_kwargs["name"] = name
+            doc_str = description or getattr(tool, "__doc__", None) or f"Tool {getattr(tool, '__name__', 'unnamed')}"
+            func_kwargs["description"] = doc_str
+            tool = StructuredTool.from_function(tool, **func_kwargs)
         else:
             raise TypeError(f"Expected a LangChain BaseTool or callable, got {type(tool)}")
 
