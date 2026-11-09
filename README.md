@@ -316,6 +316,68 @@ except ToolReviewRequiredError as err:
     shield.approve_review(err.review_id, approver="supervisor_1")
 ```
 
+### 4. LangChain Integration (`agentshield[langchain]`)
+
+AgentShield provides an adapter for LangChain tools (`BaseTool`, `@tool`, `StructuredTool`).
+
+#### Installation
+```bash
+pip install agentshield[langchain]
+```
+Supported LangChain versions: `langchain-core>=0.2.0` (compatible with LangChain 0.2.x, 0.3.x, and 1.x).
+The core `agentshield` package does not depend on LangChain; all integration imports are lazy.
+
+#### Usage
+```python
+from langchain_core.tools import tool
+from agentshield import Shield, PolicyConfiguration, ToolBlockedError, ToolReviewRequiredError
+
+# Initialize Shield with policy
+shield = Shield(policy=policy)
+
+@tool
+def process_refund(order_id: str, amount: float) -> dict:
+    """Process customer refund."""
+    return {"order_id": order_id, "amount": amount, "status": "refunded"}
+
+# Wrap existing LangChain tool
+safe_refund = shield.protect_langchain_tool(
+    process_refund,
+    agent="support_bot",
+    permissions=["finance:refund"],
+)
+
+# Preserves tool name, description, args_schema, and args:
+print(safe_refund.name)         # 'process_refund'
+print(safe_refund.description)  # 'Process customer refund.'
+print(safe_refund.args_schema)  # Pydantic schema
+
+# 1. ALLOW: Invokes the underlying tool exactly once
+result = safe_refund.invoke({"order_id": "ord_101", "amount": 25.0})
+
+# 2. BLOCK: Policy violations fail closed without invoking underlying tool
+try:
+    safe_refund.invoke({"order_id": "ord_101", "amount": 9000.0})
+except ToolBlockedError as err:
+    print(f"Blocked: {err}")
+
+# 3. REVIEW & Approval Workflow:
+try:
+    safe_refund.invoke({"order_id": "ord_101", "amount": 2500.0})
+except ToolReviewRequiredError as err:
+    print(f"Enqueued for review: {err.review_id}")
+    # The tool was NOT executed. A supervisor approves the review:
+    res = shield.approve_review(err.review_id, approver="lead_auditor")
+    print(res.tool_result)  # Executes tool once with validated frozen arguments
+
+# 4. Async tools:
+# Supported natively via await safe_tool.ainvoke({...})
+```
+
+#### Review Approval Resume Semantics
+When an action is flagged for `REVIEW`, the request arguments are normalized, validated, and frozen into the persistent `ReviewStore`.
+Upon approval via `shield.approve_review(review_id, approver=...)`, AgentShield retrieves the frozen arguments from the store and executes the underlying tool via its registered callable exactly once. Subsequent approval attempts fail closed (at-most-once initiation). For async-only tools approved in synchronous review contexts, AgentShield executes via safe event loop delegation.
+
 ---
 
 ## Vercel Deployment Guide

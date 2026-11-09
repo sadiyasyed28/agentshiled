@@ -657,6 +657,41 @@ class Shield:
 
     tool = protect_tool
 
+    def protect_langchain_tool(
+        self,
+        tool: Any,
+        agent: Optional[str] = None,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        permissions: Optional[List[str]] = None,
+        correlation_id: Optional[str] = None,
+        raise_on_blocked: bool = True,
+        read_only: bool = False,
+        idempotent: bool = False,
+        guarantees_deduplication: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Wraps a LangChain BaseTool with AgentShield runtime security policy enforcement.
+
+        Requires 'langchain-core' (install via `pip install agentshield[langchain]`).
+        """
+        from agentshield.integrations.langchain import protect_langchain_tool
+        return protect_langchain_tool(
+            tool=tool,
+            shield=self,
+            agent=agent,
+            name=name,
+            description=description,
+            permissions=permissions,
+            correlation_id=correlation_id,
+            raise_on_blocked=raise_on_blocked,
+            read_only=read_only,
+            idempotent=idempotent,
+            guarantees_deduplication=guarantees_deduplication,
+            metadata=metadata,
+        )
+
     def _audit_action(
         self,
         action_name: str,

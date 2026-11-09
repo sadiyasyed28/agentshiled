@@ -157,4 +157,14 @@ __all__ = [
     "validate_runtime_config",
     "sanitize_url",
     "ConfigValidationResult",
+    "AgentShieldTool",
+    "protect_langchain_tool",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy import handler for optional integrations."""
+    if name in ("AgentShieldTool", "protect_langchain_tool"):
+        from .integrations.langchain import AgentShieldTool, protect_langchain_tool
+        return locals()[name]
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
