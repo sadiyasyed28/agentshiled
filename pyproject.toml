@@ -9,21 +9,35 @@ description = "An open-source runtime security and control layer for AI agents."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.100.0",
     "pydantic>=2.0",
-    "uvicorn>=0.20.0",
-    "google-genai>=0.1.0",
-    "psycopg[binary]>=3.1.0",
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+]
 postgres = [
     "psycopg[binary]>=3.1.0",
+]
+gemini = [
+    "google-genai>=0.1.0",
+]
+all = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "psycopg[binary]>=3.1.0",
+    "google-genai>=0.1.0",
 ]
 dev = [
     "pytest>=7.0",
     "httpx>=0.24.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agentshield*"]
+exclude = ["components*", "assets*", "hooks*", "api*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

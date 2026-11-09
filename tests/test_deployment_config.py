@@ -382,3 +382,60 @@ def test_postgresql_driver_missing_diagnostic_in_production(monkeypatch):
             msg = str(exc_info.value)
             assert "no PostgreSQL driver" in msg
             assert "psycopg" in msg
+
+
+def test_packaging_isolation_and_optional_extras():
+    """Verifies Python SDK packaging isolation, minimal core deps, and optional extras."""
+    import tomllib
+    import zipfile
+
+    pyproject_path = ROOT_DIR / "pyproject.toml"
+    with open(pyproject_path, "rb") as f:
+        config = tomllib.load(f)
+
+    project = config.get("project", {})
+    deps = project.get("dependencies", [])
+    opt_deps = project.get("optional-dependencies", {})
+
+    # Core SDK dependencies must be minimal (no fastapi, uvicorn, psycopg, or google-genai)
+    core_pkg_names = [d.split(">=")[0].split("==")[0].split("[")[0].strip().lower() for d in deps]
+    assert "pydantic" in core_pkg_names, "pydantic must be in core dependencies"
+    assert "fastapi" not in core_pkg_names, "fastapi must not be in core SDK dependencies"
+    assert "uvicorn" not in core_pkg_names, "uvicorn must not be in core SDK dependencies"
+    assert "psycopg" not in core_pkg_names, "psycopg must not be in core SDK dependencies"
+    assert "google-genai" not in core_pkg_names, "google-genai must not be in core SDK dependencies"
+
+    # Optional extras must declare server, postgres, gemini, and all
+    assert "server" in opt_deps, "server extra must be defined"
+    server_pkgs = [d.split(">=")[0].split("[")[0].strip().lower() for d in opt_deps["server"]]
+    assert "fastapi" in server_pkgs
+    assert "uvicorn" in server_pkgs
+
+    assert "postgres" in opt_deps, "postgres extra must be defined"
+    postgres_pkgs = [d.split(">=")[0].split("[")[0].strip().lower() for d in opt_deps["postgres"]]
+    assert "psycopg" in postgres_pkgs
+
+    assert "gemini" in opt_deps, "gemini extra must be defined"
+    gemini_pkgs = [d.split(">=")[0].split("[")[0].strip().lower() for d in opt_deps["gemini"]]
+    assert "google-genai" in gemini_pkgs
+
+    assert "all" in opt_deps, "all extra must be defined"
+
+    # Setuptools package discovery must be explicitly restricted to agentshield
+    find_config = config.get("tool", {}).get("setuptools", {}).get("packages", {}).get("find", {})
+    assert find_config.get("where") == ["src"]
+    assert "agentshield*" in find_config.get("include", [])
+
+    # If wheel is present in dist/, verify that no frontend assets are packaged
+    dist_dir = ROOT_DIR / "dist"
+    wheels = list(dist_dir.glob("*.whl")) if dist_dir.exists() else []
+    for whl in wheels:
+        with zipfile.ZipFile(whl, "r") as z:
+            names = z.namelist()
+            for name in names:
+                assert not name.startswith("components/"), f"Frontend component found in wheel: {name}"
+                assert not name.startswith("assets/"), f"Frontend asset found in wheel: {name}"
+                assert not name.startswith("hooks/"), f"Frontend hook found in wheel: {name}"
+                assert not name.startswith("api/"), f"Frontend api client found in wheel: {name}"
+                assert not name.endswith(".tsx"), f"TypeScript React file found in wheel: {name}"
+                assert not name.endswith(".jsx"), f"React JSX file found in wheel: {name}"
