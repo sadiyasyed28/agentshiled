@@ -192,6 +192,96 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
+## Standalone Python SDK & Declarative Policy
+
+AgentShield can be used as a standalone Python SDK independently of any web server or dashboard:
+
+```bash
+# Core lightweight installation (pydantic only):
+pip install agentshield
+
+# With YAML policy loading support:
+pip install "agentshield[yaml]"
+```
+
+### 1. Declarative Policy via Dictionary
+
+```python
+from agentshield import Shield, PolicyConfiguration
+
+# Define policy declaratively
+policy = PolicyConfiguration.from_dict({
+    "agents": {
+        "support_bot": {
+            "allowed_tools": ["lookup_order", "check_status"],
+            "denied_tools": ["process_refund"],
+            "allowed_destinations": ["api.store.internal"],
+        }
+    },
+    "tools": {
+        "lookup_order": {
+            "max_quantity": "inf",
+            "allowed_destinations": ["api.store.internal"],
+            "argument_schema": {
+                "order_id": "str",
+            },
+        },
+        "process_refund": {
+            "max_amount": 500.0,
+            "required_permissions": ["finance:refund"],
+        },
+    },
+})
+
+shield = Shield(policy=policy)
+
+# Register tool implementation (held exclusively by the executor)
+shield.registry.register("lookup_order", lambda args: {"status": "shipped"})
+
+# Authorize and execute safely
+result = shield.execute(
+    agent="support_bot",
+    tool="lookup_order",
+    arguments={"order_id": "ord_123", "destination": "api.store.internal"},
+)
+print(result.decision.decision.value)  # ALLOW
+print(result.tool_result)             # {'status': 'shipped'}
+```
+
+### 2. Declarative Policy via YAML
+
+```python
+from agentshield import Shield, PolicyConfiguration
+
+# Load policy directly from a YAML file or string (requires agentshield[yaml])
+policy = PolicyConfiguration.from_yaml("policy.yaml")
+shield = Shield(policy=policy)
+```
+
+Example `policy.yaml`:
+
+```yaml
+version: "1"
+agents:
+  support_bot:
+    allowed_tools:
+      - lookup_order
+      - check_status
+    denied_tools:
+      - process_refund
+    allowed_destinations:
+      - api.store.internal
+tools:
+  lookup_order:
+    max_quantity: inf
+    allowed_destinations:
+      - api.store.internal
+    argument_schema:
+      order_id: str
+```
+
+---
+
 ## Vercel Deployment Guide
 
 AgentShield is configured for deployment on Vercel with a Python serverless backend and a Vite React SPA frontend.

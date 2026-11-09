@@ -419,6 +419,10 @@ def test_packaging_isolation_and_optional_extras():
     gemini_pkgs = [d.split(">=")[0].split("[")[0].strip().lower() for d in opt_deps["gemini"]]
     assert "google-genai" in gemini_pkgs
 
+    assert "yaml" in opt_deps, "yaml extra must be defined"
+    yaml_pkgs = [d.split(">=")[0].split("[")[0].strip().lower() for d in opt_deps["yaml"]]
+    assert "pyyaml" in yaml_pkgs
+
     assert "all" in opt_deps, "all extra must be defined"
 
     # Setuptools package discovery must be explicitly restricted to agentshield

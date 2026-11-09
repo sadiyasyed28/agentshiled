@@ -174,6 +174,8 @@ class Shield:
         max_tool_execution_seconds: Optional[float] = None,
         logger: Optional[Any] = None,
         metrics_collector: Optional[Any] = None,
+        policy: Optional[Any] = None,
+        policy_config: Optional[Any] = None,
     ):
         self.registry = ToolRegistry()
         self.analyst = analyst
@@ -195,19 +197,30 @@ class Shield:
             cycle_limit=self.reliability_config.loop_cycle_limit,
         )
         self.budget_tracker = budget_tracker or SessionBudgetTracker()
-        config = PolicyConfiguration(
-            agents={
-                "shopping_agent": AgentConfig(
-                    name="shopping_agent",
-                    allowed_tools=["search_product", "get_product", "create_order"],
-                    denied_tools=["refund_order"]
+        effective_policy = policy if policy is not None else policy_config
+        if effective_policy is not None:
+            if isinstance(effective_policy, PolicyConfiguration):
+                config = effective_policy
+            elif isinstance(effective_policy, dict):
+                config = PolicyConfiguration.from_dict(effective_policy)
+            else:
+                raise TypeError(
+                    f"policy must be a PolicyConfiguration or dict, got {type(effective_policy).__name__}"
                 )
-            },
-            tools={
-                "create_order": ToolRule(tool="create_order", max_quantity=10),
-                "refund_order": ToolRule(tool="refund_order", max_amount=10000, required_permissions=["refund"])
-            }
-        )
+        else:
+            config = PolicyConfiguration(
+                agents={
+                    "shopping_agent": AgentConfig(
+                        name="shopping_agent",
+                        allowed_tools=["search_product", "get_product", "create_order"],
+                        denied_tools=["refund_order"]
+                    )
+                },
+                tools={
+                    "create_order": ToolRule(tool="create_order", max_quantity=10),
+                    "refund_order": ToolRule(tool="refund_order", max_amount=10000, required_permissions=["refund"])
+                }
+            )
         self.policy_engine = PolicyEngine(config)
         self.risk_engine = risk_engine or RiskEngine()
         self.audit_store = audit_store
@@ -299,6 +312,37 @@ class Shield:
 
         self._agent_salts[agent] = new_salt
         self.agent_keys[agent] = new_hash
+
+    def load_policy(
+        self,
+        policy: Any
+    ) -> PolicyConfiguration:
+        """Loads a declarative policy configuration into the shield's policy engine.
+
+        Args:
+            policy: A PolicyConfiguration instance, a dictionary, or a YAML string/Path.
+
+        Returns:
+            The loaded PolicyConfiguration instance.
+        """
+        from pathlib import Path
+        if isinstance(policy, PolicyConfiguration):
+            loaded_config = policy
+        elif isinstance(policy, dict):
+            loaded_config = PolicyConfiguration.from_dict(policy)
+        elif isinstance(policy, (str, Path)):
+            loaded_config = PolicyConfiguration.from_yaml(policy)
+        else:
+            raise TypeError(f"Unsupported policy type: {type(policy).__name__}")
+
+        self.policy_engine = PolicyEngine(loaded_config)
+        return loaded_config
+
+    def set_policy(self, policy: PolicyConfiguration) -> None:
+        """Sets the active PolicyConfiguration on the policy engine."""
+        if not isinstance(policy, PolicyConfiguration):
+            raise TypeError(f"policy must be a PolicyConfiguration instance, got {type(policy).__name__}")
+        self.policy_engine = PolicyEngine(policy)
 
     def _audit_action(
         self,

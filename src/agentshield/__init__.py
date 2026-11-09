@@ -1,5 +1,12 @@
 """AgentShield core package."""
 from .shield import Shield, ExecutionResult, ExecutionStatus
+from .policy import (
+    PolicyEngine,
+    PolicyConfiguration,
+    AgentConfig,
+    ToolRule,
+    PolicyValidationError,
+)
 from .risk import RiskEngine
 from .detector import PromptInjectionDetector, InjectionFinding
 from .audit import AuditStore, SQLiteAuditStore, AuditRecord
@@ -69,6 +76,11 @@ __all__ = [
     "Shield",
     "ExecutionResult",
     "ExecutionStatus",
+    "PolicyEngine",
+    "PolicyConfiguration",
+    "AgentConfig",
+    "ToolRule",
+    "PolicyValidationError",
     "RiskEngine",
     "PromptInjectionDetector",
     "InjectionFinding",
