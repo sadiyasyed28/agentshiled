@@ -22,12 +22,22 @@ class SessionRecord:
     created_at: float
     expires_at: float
     revoked: bool = False
+    tenant_id: str = "default"
+    role: str = "tenant_admin"
 
 
 class SessionStore(Protocol):
     """Protocol for session persistence and revocation storage."""
 
-    def save_session(self, token_hash: str, user: str, created_at: float, expires_at: float) -> None:
+    def save_session(
+        self,
+        token_hash: str,
+        user: str,
+        created_at: float,
+        expires_at: float,
+        tenant_id: str = "default",
+        role: str = "tenant_admin",
+    ) -> None:
         """Record an active session token hash."""
         ...
 
@@ -41,6 +51,10 @@ class SessionStore(Protocol):
 
     def cleanup_expired(self) -> int:
         """Purge expired session records."""
+        ...
+
+    def get_session(self, token_hash: str) -> Optional[SessionRecord]:
+        """Retrieve a session record if found."""
         ...
 
 
@@ -70,19 +84,59 @@ class SqliteSessionStore:
                     user TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
-                    revoked INTEGER NOT NULL DEFAULT 0
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    role TEXT NOT NULL DEFAULT 'tenant_admin'
                 )
             """)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(sessions);")
+            cols = [c["name"] for c in cursor.fetchall()]
+            if "tenant_id" not in cols:
+                cursor.execute("ALTER TABLE sessions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
+            if "role" not in cols:
+                cursor.execute("ALTER TABLE sessions ADD COLUMN role TEXT NOT NULL DEFAULT 'tenant_admin';")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON sessions(tenant_id)")
             conn.commit()
 
-    def save_session(self, token_hash: str, user: str, created_at: float, expires_at: float) -> None:
+    def save_session(
+        self,
+        token_hash: str,
+        user: str,
+        created_at: float,
+        expires_at: float,
+        tenant_id: str = "default",
+        role: str = "tenant_admin",
+    ) -> None:
         with self._get_connection() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO sessions (token_hash, user, created_at, expires_at, revoked) VALUES (?, ?, ?, ?, 0)",
-                (token_hash, user, created_at, expires_at),
+                """
+                INSERT OR REPLACE INTO sessions (token_hash, user, created_at, expires_at, revoked, tenant_id, role)
+                VALUES (?, ?, ?, ?, 0, ?, ?)
+                """,
+                (token_hash, user, created_at, expires_at, tenant_id, role),
             )
             conn.commit()
+
+    def get_session(self, token_hash: str) -> Optional[SessionRecord]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT token_hash, user, created_at, expires_at, revoked, tenant_id, role FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+            if not row:
+                return None
+            cols = row.keys()
+            return SessionRecord(
+                token_hash=row["token_hash"],
+                user=row["user"],
+                created_at=float(row["created_at"]),
+                expires_at=float(row["expires_at"]),
+                revoked=bool(row["revoked"]),
+                tenant_id=row["tenant_id"] if "tenant_id" in cols else "default",
+                role=row["role"] if "role" in cols else "tenant_admin",
+            )
 
     def is_revoked(self, token_hash: str) -> bool:
         with self._get_connection() as conn:
@@ -123,13 +177,23 @@ class InMemorySessionStore:
     def __init__(self):
         self._sessions: dict[str, SessionRecord] = {}
 
-    def save_session(self, token_hash: str, user: str, created_at: float, expires_at: float) -> None:
+    def save_session(
+        self,
+        token_hash: str,
+        user: str,
+        created_at: float,
+        expires_at: float,
+        tenant_id: str = "default",
+        role: str = "tenant_admin",
+    ) -> None:
         self._sessions[token_hash] = SessionRecord(
             token_hash=token_hash,
             user=user,
             created_at=created_at,
             expires_at=expires_at,
             revoked=False,
+            tenant_id=tenant_id,
+            role=role,
         )
 
     def is_revoked(self, token_hash: str) -> bool:
@@ -151,6 +215,9 @@ class InMemorySessionStore:
             )
         return True
 
+    def get_session(self, token_hash: str) -> Optional[SessionRecord]:
+        return self._sessions.get(token_hash)
+
     def cleanup_expired(self) -> int:
         now = time.time()
         to_del = [k for k, v in self._sessions.items() if v.expires_at < now]
@@ -164,7 +231,7 @@ class SessionManager:
     Cryptographic session manager using HMAC-SHA256 signed tokens and SessionStore.
 
     Token format: base64url(payload).hmac_sha256_hex
-    Payload JSON: {"sub": user, "jti": jti, "iat": iat, "exp": exp}
+    Payload JSON: {"sub": user, "tenant_id": tenant_id, "role": role, "jti": jti, "iat": iat, "exp": exp}
     """
 
     def __init__(
@@ -185,13 +252,22 @@ class SessionManager:
         """Hash a token with SHA-256 for secure storage and revocation lookup."""
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    def create_session(self, user: str = "admin") -> Tuple[str, float]:
+    def create_session(
+        self,
+        user: str = "admin",
+        tenant_id: str = "default",
+        role: str = "tenant_admin",
+        user_id: Optional[str] = None,
+    ) -> Tuple[str, float]:
         """Generate a cryptographically signed session token and record it in the store."""
         now = time.time()
         expires_at = now + self.ttl_seconds
         jti = uuid.uuid4().hex
+        effective_user = user_id or user
         payload = {
-            "sub": user,
+            "sub": effective_user,
+            "tenant_id": tenant_id,
+            "role": role,
             "jti": jti,
             "iat": int(now),
             "exp": int(expires_at),
@@ -201,7 +277,14 @@ class SessionManager:
         sig = hmac.new(self.signing_key, payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
         token = f"{payload_b64}.{sig}"
         token_hash = self.hash_token(token)
-        self.store.save_session(token_hash=token_hash, user=user, created_at=now, expires_at=expires_at)
+        self.store.save_session(
+            token_hash=token_hash,
+            user=effective_user,
+            created_at=now,
+            expires_at=expires_at,
+            tenant_id=tenant_id,
+            role=role,
+        )
         return token, expires_at
 
     def verify_token(self, token: str) -> Optional[dict]:
@@ -236,6 +319,12 @@ class SessionManager:
         token_hash = self.hash_token(token)
         if self.store.is_revoked(token_hash):
             return None
+
+        # Ensure multi-tenancy backwards compatibility for legacy tokens
+        if "tenant_id" not in payload:
+            payload["tenant_id"] = "default"
+        if "role" not in payload:
+            payload["role"] = "platform_admin" if payload.get("sub") == "admin" else "tenant_admin"
 
         return payload
 

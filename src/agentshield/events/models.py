@@ -62,6 +62,7 @@ class SecurityEvent:
     trace_id: str = field(default_factory=lambda: f"trc_{uuid.uuid4().hex[:12]}")
     correlation_id: str = field(default_factory=lambda: f"corr_{uuid.uuid4().hex[:12]}")
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = "default"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -123,6 +124,7 @@ class SecurityAlert:
     resolved_by: Optional[str] = None
     resolution_note: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = "default"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -145,6 +147,7 @@ class SecurityIncident:
     assigned_to: Optional[str] = None
     resolution_summary: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tenant_id: str = "default"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

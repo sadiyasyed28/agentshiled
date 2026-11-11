@@ -51,6 +51,7 @@ class PostgresEventStore(EventStore):
             cursor.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.events_table} (
                     event_id VARCHAR(64) PRIMARY KEY,
+                    tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
                     timestamp TEXT NOT NULL,
                     agent_id VARCHAR(128) NOT NULL,
                     tool VARCHAR(128) NOT NULL,
@@ -67,10 +68,12 @@ class PostgresEventStore(EventStore):
             """)
             cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.events_table}_agent ON {self.events_table}(agent_id);")
             cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.events_table}_corr ON {self.events_table}(correlation_id);")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.events_table}_tenant ON {self.events_table}(tenant_id);")
 
             cursor.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.alerts_table} (
                     alert_id VARCHAR(64) PRIMARY KEY,
+                    tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
                     timestamp TEXT NOT NULL,
                     title VARCHAR(256) NOT NULL,
                     description TEXT NOT NULL,
@@ -92,10 +95,12 @@ class PostgresEventStore(EventStore):
                     updated_at DOUBLE PRECISION NOT NULL
                 );
             """)
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.alerts_table}_tenant ON {self.alerts_table}(tenant_id);")
 
             cursor.execute(f"""
                 CREATE TABLE IF NOT EXISTS {self.incidents_table} (
                     incident_id VARCHAR(64) PRIMARY KEY,
+                    tenant_id VARCHAR(128) NOT NULL DEFAULT 'default',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     title VARCHAR(256) NOT NULL,
@@ -111,19 +116,22 @@ class PostgresEventStore(EventStore):
                     metadata TEXT NOT NULL DEFAULT '{{}}'
                 );
             """)
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.incidents_table}_tenant ON {self.incidents_table}(tenant_id);")
 
     def record_event(self, event: SecurityEvent) -> None:
         now = time.time()
+        tenant = event.tenant_id or "default"
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"""
                 INSERT INTO {self.events_table} (
-                    event_id, timestamp, agent_id, tool, event_type, severity,
+                    event_id, tenant_id, timestamp, agent_id, tool, event_type, severity,
                     decision, risk_score, evidence, trace_id, correlation_id,
                     metadata, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
                 event.event_id,
+                tenant,
                 event.timestamp,
                 event.agent_id,
                 event.tool,
@@ -152,12 +160,16 @@ class PostgresEventStore(EventStore):
             trace_id=row_dict["trace_id"],
             correlation_id=row_dict["correlation_id"],
             metadata=json.loads(row_dict["metadata"]),
+            tenant_id=row_dict.get("tenant_id") or "default",
         )
 
-    def get_event(self, event_id: str) -> Optional[SecurityEvent]:
+    def get_event(self, event_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityEvent]:
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM {self.events_table} WHERE event_id = %s;", (event_id,))
+            if tenant_id:
+                cursor.execute(f"SELECT * FROM {self.events_table} WHERE event_id = %s AND tenant_id = %s;", (event_id, tenant_id))
+            else:
+                cursor.execute(f"SELECT * FROM {self.events_table} WHERE event_id = %s;", (event_id,))
             col_names = [d[0] for d in cursor.description] if cursor.description else []
             row = cursor.fetchone()
             if not row:
@@ -177,10 +189,14 @@ class PostgresEventStore(EventStore):
         end_time: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityEvent]:
         conditions: List[str] = []
         params: List[Any] = []
 
+        if tenant_id:
+            conditions.append("tenant_id = %s")
+            params.append(tenant_id)
         if agent_id:
             conditions.append("agent_id = %s")
             params.append(agent_id)
@@ -229,16 +245,18 @@ class PostgresEventStore(EventStore):
 
     def create_alert(self, alert: SecurityAlert) -> None:
         now = time.time()
+        tenant = alert.tenant_id or "default"
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"""
                 INSERT INTO {self.alerts_table} (
-                    alert_id, timestamp, title, description, alert_type, severity,
+                    alert_id, tenant_id, timestamp, title, description, alert_type, severity,
                     status, agent_id, trigger_event_id, event_ids, correlation_id,
                     incident_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
                 alert.alert_id,
+                tenant,
                 alert.timestamp,
                 alert.title,
                 alert.description,
@@ -276,12 +294,16 @@ class PostgresEventStore(EventStore):
             resolved_by=row_dict.get("resolved_by"),
             resolution_note=row_dict.get("resolution_note") or row_dict.get("resolution_notes"),
             metadata=meta,
+            tenant_id=row_dict.get("tenant_id") or "default",
         )
 
-    def get_alert(self, alert_id: str) -> Optional[SecurityAlert]:
+    def get_alert(self, alert_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityAlert]:
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM {self.alerts_table} WHERE alert_id = %s;", (alert_id,))
+            if tenant_id:
+                cursor.execute(f"SELECT * FROM {self.alerts_table} WHERE alert_id = %s AND tenant_id = %s;", (alert_id, tenant_id))
+            else:
+                cursor.execute(f"SELECT * FROM {self.alerts_table} WHERE alert_id = %s;", (alert_id,))
             col_names = [d[0] for d in cursor.description] if cursor.description else []
             row = cursor.fetchone()
             if not row:
@@ -298,10 +320,14 @@ class PostgresEventStore(EventStore):
         incident_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityAlert]:
         conditions: List[str] = []
         params: List[Any] = []
 
+        if tenant_id:
+            conditions.append("tenant_id = %s")
+            params.append(tenant_id)
         if status:
             conditions.append("status = %s")
             params.append(status)
@@ -342,42 +368,47 @@ class PostgresEventStore(EventStore):
         status: str,
         actor: str,
         note: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityAlert]:
         now_ts = datetime.now(timezone.utc).isoformat()
         now_epoch = time.time()
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
+            tenant_cond = "AND tenant_id = %s" if tenant_id else ""
+            extra_params = (tenant_id,) if tenant_id else ()
             if status == AlertStatus.ACKNOWLEDGED.value:
                 cursor.execute(f"""
                     UPDATE {self.alerts_table}
                     SET status = %s, acknowledged_at = %s, acknowledged_by = %s, updated_at = %s
-                    WHERE alert_id = %s;
-                """, (status, now_ts, actor, now_epoch, alert_id))
+                    WHERE alert_id = %s {tenant_cond};
+                """, (status, now_ts, actor, now_epoch, alert_id) + extra_params)
             elif status == AlertStatus.RESOLVED.value:
                 cursor.execute(f"""
                     UPDATE {self.alerts_table}
                     SET status = %s, resolved_at = %s, resolved_by = %s, resolution_notes = %s, updated_at = %s
-                    WHERE alert_id = %s;
-                """, (status, now_ts, actor, note, now_epoch, alert_id))
+                    WHERE alert_id = %s {tenant_cond};
+                """, (status, now_ts, actor, note, now_epoch, alert_id) + extra_params)
             else:
                 cursor.execute(f"""
                     UPDATE {self.alerts_table}
                     SET status = %s, updated_at = %s
-                    WHERE alert_id = %s;
-                """, (status, now_epoch, alert_id))
-        return self.get_alert(alert_id)
+                    WHERE alert_id = %s {tenant_cond};
+                """, (status, now_epoch, alert_id) + extra_params)
+        return self.get_alert(alert_id, tenant_id=tenant_id)
 
     def create_incident(self, incident: SecurityIncident) -> None:
+        tenant = incident.tenant_id or "default"
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"""
                 INSERT INTO {self.incidents_table} (
-                    incident_id, created_at, updated_at, title, description,
+                    incident_id, tenant_id, created_at, updated_at, title, description,
                     severity, status, agent_id, correlation_id, alert_ids,
                     event_count, assigned_to, resolution_summary, metadata
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
                 incident.incident_id,
+                tenant,
                 incident.created_at,
                 incident.updated_at,
                 incident.title,
@@ -411,22 +442,29 @@ class PostgresEventStore(EventStore):
             assigned_to=row_dict.get("assigned_to"),
             resolution_summary=row_dict.get("resolution_summary"),
             metadata=meta,
+            tenant_id=row_dict.get("tenant_id") or "default",
         )
 
-    def get_incident(self, incident_id: str) -> Optional[SecurityIncident]:
+    def get_incident(self, incident_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityIncident]:
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM {self.incidents_table} WHERE incident_id = %s;", (incident_id,))
+            if tenant_id:
+                cursor.execute(f"SELECT * FROM {self.incidents_table} WHERE incident_id = %s AND tenant_id = %s;", (incident_id, tenant_id))
+            else:
+                cursor.execute(f"SELECT * FROM {self.incidents_table} WHERE incident_id = %s;", (incident_id,))
             col_names = [d[0] for d in cursor.description] if cursor.description else []
             row = cursor.fetchone()
             if not row:
                 return None
             return self._row_to_incident(dict(zip(col_names, row)))
 
-    def get_incident_by_correlation(self, correlation_id: str) -> Optional[SecurityIncident]:
+    def get_incident_by_correlation(self, correlation_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityIncident]:
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM {self.incidents_table} WHERE correlation_id = %s;", (correlation_id,))
+            if tenant_id:
+                cursor.execute(f"SELECT * FROM {self.incidents_table} WHERE correlation_id = %s AND tenant_id = %s;", (correlation_id, tenant_id))
+            else:
+                cursor.execute(f"SELECT * FROM {self.incidents_table} WHERE correlation_id = %s;", (correlation_id,))
             col_names = [d[0] for d in cursor.description] if cursor.description else []
             row = cursor.fetchone()
             if not row:
@@ -441,10 +479,14 @@ class PostgresEventStore(EventStore):
         correlation_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityIncident]:
         conditions: List[str] = []
         params: List[Any] = []
 
+        if tenant_id:
+            conditions.append("tenant_id = %s")
+            params.append(tenant_id)
         if status:
             conditions.append("status = %s")
             params.append(status)
@@ -482,9 +524,10 @@ class PostgresEventStore(EventStore):
         increment_event_count: int = 0,
         assigned_to: Optional[str] = None,
         resolution_summary: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityIncident]:
         now_ts = datetime.now(timezone.utc).isoformat()
-        current = self.get_incident(incident_id)
+        current = self.get_incident(incident_id, tenant_id=tenant_id)
         if not current:
             return None
 
@@ -499,11 +542,13 @@ class PostgresEventStore(EventStore):
 
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
+            tenant_cond = "AND tenant_id = %s" if tenant_id else ""
+            extra_params = (tenant_id,) if tenant_id else ()
             cursor.execute(f"""
                 UPDATE {self.incidents_table}
                 SET status = %s, severity = %s, alert_ids = %s, event_count = %s,
                     assigned_to = %s, resolution_summary = %s, updated_at = %s
-                WHERE incident_id = %s;
+                WHERE incident_id = %s {tenant_cond};
             """, (
                 new_status,
                 new_severity,
@@ -513,17 +558,25 @@ class PostgresEventStore(EventStore):
                 new_resolution,
                 now_ts,
                 incident_id,
-            ))
-        return self.get_incident(incident_id)
+            ) + extra_params)
+        return self.get_incident(incident_id, tenant_id=tenant_id)
 
     def record_alert_and_correlate(self, alert: SecurityAlert, trigger_event: SecurityEvent) -> SecurityAlert:
         """Atomically persists alert and correlates with an incident in a single transaction."""
         now = time.time()
         now_ts = datetime.now(timezone.utc).isoformat()
+        tenant = alert.tenant_id or trigger_event.tenant_id or "default"
+        alert.tenant_id = tenant
+        trigger_event.tenant_id = tenant
+
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
-            # 1. Correlate with existing incident by correlation_id
-            cursor.execute(f"SELECT incident_id, alert_ids, event_count FROM {self.incidents_table} WHERE correlation_id = %s;", (alert.correlation_id,))
+            # 1. Correlate with existing incident by correlation_id AND tenant_id
+            cursor.execute(f"""
+                SELECT incident_id, alert_ids, event_count
+                FROM {self.incidents_table}
+                WHERE correlation_id = %s AND tenant_id = %s;
+            """, (alert.correlation_id, tenant))
             row = cursor.fetchone()
             if row:
                 incident_id, existing_alert_ids_raw, event_cnt = row[0], row[1], row[2]
@@ -533,18 +586,19 @@ class PostgresEventStore(EventStore):
                 cursor.execute(f"""
                     UPDATE {self.incidents_table}
                     SET alert_ids = %s, event_count = %s, updated_at = %s
-                    WHERE incident_id = %s;
-                """, (json.dumps(existing_alerts), event_cnt + 1, now_ts, incident_id))
+                    WHERE incident_id = %s AND tenant_id = %s;
+                """, (json.dumps(existing_alerts), event_cnt + 1, now_ts, incident_id, tenant))
             else:
                 incident_id = f"inc_{uuid.uuid4().hex[:12]}"
                 cursor.execute(f"""
                     INSERT INTO {self.incidents_table} (
-                        incident_id, created_at, updated_at, title, description,
+                        incident_id, tenant_id, created_at, updated_at, title, description,
                         severity, status, agent_id, correlation_id, alert_ids,
                         event_count
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1);
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1);
                 """, (
                     incident_id,
+                    tenant,
                     now_ts,
                     now_ts,
                     f"Incident triggered by {alert.title}",
@@ -560,12 +614,13 @@ class PostgresEventStore(EventStore):
             alert.incident_id = incident_id
             cursor.execute(f"""
                 INSERT INTO {self.alerts_table} (
-                    alert_id, timestamp, title, description, alert_type, severity,
+                    alert_id, tenant_id, timestamp, title, description, alert_type, severity,
                     status, agent_id, trigger_event_id, event_ids, correlation_id,
                     incident_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, (
                 alert.alert_id,
+                tenant,
                 alert.timestamp,
                 alert.title,
                 alert.description,

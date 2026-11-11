@@ -300,6 +300,7 @@ class Shield:
 
         # Paused agents set (incident response kill-switch)
         self._paused_agents: Set[str] = set()
+        self._tenant_paused_agents: Dict[str, Set[str]] = {}
 
         # Observability & Monitoring
         from agentshield.observability import get_operational_logger, get_metrics_collector
@@ -770,11 +771,13 @@ class Shield:
         decision_val: DecisionValue,
         reasons: List[str],
         details: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
         if not self.audit_store:
             return
         trace_id = details.get("trace_id") if details else None
         correlation_id = details.get("correlation_id") if details else None
+        effective_tenant = tenant_id or (details.get("tenant_id") if details else None) or "default"
         dec = Decision(
             allowed=(decision_val == DecisionValue.ALLOW),
             decision=decision_val,
@@ -793,7 +796,8 @@ class Shield:
             decision=dec,
             arguments=args,
             execution_status="executed" if decision_val == DecisionValue.ALLOW else "not_executed",
-            policy_version_hash=self.policy_engine.version_hash
+            policy_version_hash=self.policy_engine.version_hash,
+            tenant_id=effective_tenant,
         )
         self._publish_security_event(
             agent_id=agent,
@@ -805,6 +809,7 @@ class Shield:
             trace_id=trace_id,
             correlation_id=correlation_id,
             metadata=args,
+            tenant_id=effective_tenant,
         )
 
     def _publish_security_event(
@@ -819,6 +824,7 @@ class Shield:
         trace_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityEvent]:
         if not getattr(self, "event_manager", None):
             return None
@@ -834,35 +840,58 @@ class Shield:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 metadata=metadata or {},
+                tenant_id=tenant_id or "default",
             )
         except Exception:
             return None
 
-    def pause_agent(self, agent: str, actor: str = "system") -> None:
+    def pause_agent(self, agent: str, actor: str = "system", tenant_id: Optional[str] = None) -> None:
         """Pauses an agent immediately; all actions fail closed to BLOCK."""
-        self._paused_agents.add(agent)
+        if tenant_id and tenant_id != "global":
+            self._tenant_paused_agents.setdefault(tenant_id, set()).add(agent)
+        else:
+            self._paused_agents.add(agent)
         self._audit_action(
             action_name="pause",
             agent=agent,
             actor=actor,
             decision_val=DecisionValue.BLOCK,
-            reasons=[f"Agent '{agent}' paused by {actor}"]
+            reasons=[f"Agent '{agent}' paused by {actor}"],
+            details={"tenant_id": tenant_id} if tenant_id else None,
+            tenant_id=tenant_id,
         )
 
-    def unpause_agent(self, agent: str, actor: str = "system") -> None:
+    def unpause_agent(self, agent: str, actor: str = "system", tenant_id: Optional[str] = None) -> None:
         """Unpauses an agent."""
-        self._paused_agents.discard(agent)
+        if tenant_id and tenant_id != "global":
+            if tenant_id in self._tenant_paused_agents:
+                self._tenant_paused_agents[tenant_id].discard(agent)
+        else:
+            self._paused_agents.discard(agent)
         self._audit_action(
             action_name="unpause",
             agent=agent,
             actor=actor,
             decision_val=DecisionValue.ALLOW,
-            reasons=[f"Agent '{agent}' unpaused by {actor}"]
+            reasons=[f"Agent '{agent}' unpaused by {actor}"],
+            details={"tenant_id": tenant_id} if tenant_id else None,
+            tenant_id=tenant_id,
         )
 
-    def is_agent_paused(self, agent: str) -> bool:
-        """Returns True if the agent is currently paused."""
-        return agent in self._paused_agents
+    def is_agent_paused(self, agent: str, tenant_id: Optional[str] = None) -> bool:
+        """Returns True if the agent is currently paused globally or within the tenant."""
+        if agent in self._paused_agents:
+            return True
+        if tenant_id and agent in self._tenant_paused_agents.get(tenant_id, set()):
+            return True
+        return False
+
+    def get_paused_agents(self, tenant_id: Optional[str] = None) -> Set[str]:
+        """Returns the set of paused agents visible to this tenant context."""
+        paused = set(self._paused_agents)
+        if tenant_id and tenant_id in self._tenant_paused_agents:
+            paused |= self._tenant_paused_agents[tenant_id]
+        return paused
 
     def _cleanup_expired_reviews(self) -> None:
         now = time.time()
@@ -880,7 +909,9 @@ class Shield:
                     "status": ReviewStatus.EXPIRED.value,
                     "trace_id": getattr(orig_dec, "trace_id", None) if orig_dec else None,
                     "correlation_id": getattr(orig_dec, "correlation_id", None) if orig_dec else None,
-                }
+                    "tenant_id": item.get("tenant_id") or "default",
+                },
+                tenant_id=item.get("tenant_id") or "default",
             )
 
     def get_review_status(self, review_id: str) -> Optional[str]:
@@ -892,19 +923,23 @@ class Shield:
         """Returns the explicit execution state ('not_started', 'executing', 'succeeded', 'failed', 'outcome_unknown')."""
         return self.review_store.get_execution_state(review_id)
 
-    def get_review_queue(self) -> List[Dict[str, Any]]:
+    def get_review_queue(self, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Returns the pending unexpired review actions."""
         self._cleanup_expired_reviews()
-        return self.review_store.get_pending_reviews()
+        return self.review_store.get_pending_reviews(tenant_id=tenant_id)
 
     def approve_review(
-        self, review_id: str, approver: str = "human_reviewer", allow_idempotent_retry: bool = False
+        self,
+        review_id: str,
+        approver: str = "human_reviewer",
+        allow_idempotent_retry: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> Optional[ExecutionResult]:
         """Approves and executes an action from the review queue.
         Enforces at-most-once initiation for non-idempotent actions and deduplicated idempotent execution."""
         self._cleanup_expired_reviews()
 
-        item_check = self.review_store.get_review(review_id)
+        item_check = self.review_store.get_review(review_id, tenant_id=tenant_id)
         if not item_check:
             return None
 
@@ -920,6 +955,7 @@ class Shield:
 
         worker_id = f"proc_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         lease_sec = self.lease_duration
+        effective_tenant = tenant_id or item_check.get("tenant_id") or "default"
         # Atomically claim and mark executing with worker ownership and lease
         item = self.review_store.claim_and_approve(
             review_id,
@@ -928,12 +964,13 @@ class Shield:
             worker_id=worker_id,
             lease_duration=lease_sec,
             allow_idempotent_retry=can_idempotent_retry,
+            tenant_id=tenant_id,
         )
         if not item:
             return None
 
         # Security invariant: verify agent is not paused
-        if self.is_agent_paused(item["agent"]):
+        if self.is_agent_paused(item["agent"], tenant_id=effective_tenant):
             err_msg = f"Agent '{item['agent']}' is currently paused; execution blocked by containment policy"
             self.review_store.mark_executed(
                 review_id=review_id,
@@ -1069,6 +1106,7 @@ class Shield:
                 item["tool"],
                 item["arguments"],
                 idempotency_key=item.get("idempotency_key"),
+                tenant_id=effective_tenant,
             )
             exec_state = (
                 ReviewExecutionState.SUCCEEDED.value
@@ -1103,14 +1141,21 @@ class Shield:
             if hb_thread and hb_thread.is_alive():
                 hb_thread.join(timeout=1.0)
 
-    def reject_review(self, review_id: str, reason: str = "Rejected by reviewer", reviewer: str = "human_reviewer") -> Optional[Decision]:
+    def reject_review(
+        self,
+        review_id: str,
+        reason: str = "Rejected by reviewer",
+        reviewer: str = "human_reviewer",
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Decision]:
         """Rejects a pending action in the review queue."""
         self._cleanup_expired_reviews()
-        item = self.review_store.claim_and_reject(review_id, reviewer=reviewer, reason=reason, now=time.time())
+        item = self.review_store.claim_and_reject(review_id, reviewer=reviewer, reason=reason, now=time.time(), tenant_id=tenant_id)
         if not item:
             return None
 
         orig_dec = item.get("decision")
+        effective_tenant = tenant_id or item.get("tenant_id") or "default"
         # Audit reject action
         self._audit_action(
             action_name="reject",
@@ -1126,7 +1171,9 @@ class Shield:
                 "status": ReviewStatus.REJECTED.value,
                 "trace_id": getattr(orig_dec, "trace_id", None) if orig_dec else None,
                 "correlation_id": getattr(orig_dec, "correlation_id", None) if orig_dec else None,
-            }
+                "tenant_id": effective_tenant,
+            },
+            tenant_id=effective_tenant,
         )
         return Decision(
             allowed=False,
@@ -1263,8 +1310,10 @@ class Shield:
         agent_key: Optional[str] = None,
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
     ) -> Decision:
         start_time = time.perf_counter()
+        effective_tenant = tenant_id or "default"
         from agentshield.observability.correlation import sanitize_correlation_id, generate_trace_id, get_current_correlation_id
         if arguments is None:
             arguments = {}
@@ -1312,6 +1361,7 @@ class Shield:
                     trace_id=trace_id,
                     correlation_id=correlation_id,
                     metadata={"error": "payload_size_limit_exceeded", "limit": self.reliability_config.max_arguments_bytes},
+                    tenant_id=effective_tenant,
                 )
                 return self._finalize_decision(dec, start_time)
 
@@ -1347,6 +1397,7 @@ class Shield:
                             trace_id=trace_id,
                             correlation_id=correlation_id,
                             metadata={"attempted_credential_key": str(k)},
+                            tenant_id=effective_tenant,
                         )
                         return self._finalize_decision(dec, start_time)
 
@@ -1378,11 +1429,12 @@ class Shield:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 metadata={"error": str(e)},
+                tenant_id=effective_tenant,
             )
             return self._finalize_decision(dec, start_time)
 
-        # 0. Check paused status
-        if self.is_agent_paused(action.agent):
+        # 0. Check paused status (global or tenant-scoped)
+        if self.is_agent_paused(action.agent, tenant_id=effective_tenant):
             reasons = [f"Agent '{action.agent}' is currently paused by incident controls"]
             dec = self._build_decision(
                 allowed=False,
@@ -1696,6 +1748,7 @@ class Shield:
                 created_at=now,
                 expires_at=now + self.review_ttl_seconds,
                 idempotency_key=idempotency_key,
+                tenant_id=effective_tenant,
             )
             self._publish_security_event(
                 agent_id=action.agent,
@@ -1708,6 +1761,7 @@ class Shield:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 metadata={"review_id": review_id, "action": "enqueue", "arguments": action.arguments},
+                tenant_id=effective_tenant,
             )
             return self._finalize_decision(dec, start_time)
 
@@ -1738,6 +1792,7 @@ class Shield:
             trace_id=trace_id,
             correlation_id=correlation_id,
             metadata={"arguments": action.arguments},
+            tenant_id=effective_tenant,
         )
         return self._finalize_decision(dec, start_time)
 
@@ -1750,10 +1805,13 @@ class Shield:
         agent_key: Optional[str] = None,
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
     ) -> ExecutionResult:
+        effective_tenant = tenant_id or "default"
         decision = self.authorize(
             agent, tool, arguments, permissions, agent_key=agent_key,
             correlation_id=correlation_id, trace_id=trace_id,
+            tenant_id=effective_tenant,
         )
         policy_hash = self.policy_engine.version_hash
         frozen_args = decision.arguments
@@ -1766,7 +1824,8 @@ class Shield:
                         decision,
                         frozen_args,
                         execution_status="not_executed",
-                        policy_version_hash=policy_hash
+                        policy_version_hash=policy_hash,
+                        tenant_id=effective_tenant,
                     )
                 except Exception:
                     pass
@@ -1781,6 +1840,7 @@ class Shield:
                 trace_id=decision.trace_id,
                 correlation_id=decision.correlation_id,
                 metadata={"execution_status": "not_executed", "arguments": frozen_args},
+                tenant_id=effective_tenant,
             )
             if hasattr(self, "metrics_collector") and self.metrics_collector:
                 self.metrics_collector.record_execution("not_executed", duration_ms=0.0)
@@ -1799,7 +1859,7 @@ class Shield:
         idempotency_key = None
         if isinstance(frozen_args, dict):
             idempotency_key = frozen_args.get("idempotency_key")
-        return self._execute_approved(decision, agent, tool, frozen_args, idempotency_key=idempotency_key)
+        return self._execute_approved(decision, agent, tool, frozen_args, idempotency_key=idempotency_key, tenant_id=effective_tenant)
 
     def _execute_approved(
         self,
@@ -1808,7 +1868,9 @@ class Shield:
         tool: str,
         arguments: Optional[Any],
         idempotency_key: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
     ) -> ExecutionResult:
+        effective_tenant = tenant_id or "default"
         policy_hash = self.policy_engine.version_hash
         start_exec = time.perf_counter()
         registered_tool = self.registry.get_tool(tool)
@@ -1821,7 +1883,8 @@ class Shield:
                     arguments,
                     execution_status="not_executed",
                     error=err,
-                    policy_version_hash=policy_hash
+                    policy_version_hash=policy_hash,
+                    tenant_id=effective_tenant,
                 )
             self._publish_security_event(
                 agent_id=agent,
@@ -1834,6 +1897,7 @@ class Shield:
                 trace_id=decision.trace_id,
                 correlation_id=decision.correlation_id,
                 metadata={"execution_status": "not_executed", "error": err, "arguments": arguments},
+                tenant_id=effective_tenant,
             )
             if hasattr(self, "metrics_collector") and self.metrics_collector:
                 self.metrics_collector.record_execution("error", duration_ms=0.0)
@@ -1866,7 +1930,8 @@ class Shield:
                         decision,
                         arguments,
                         execution_status="executed",
-                        policy_version_hash=policy_hash
+                        policy_version_hash=policy_hash,
+                        tenant_id=effective_tenant,
                     )
                 self._publish_security_event(
                     agent_id=agent,
@@ -1879,6 +1944,7 @@ class Shield:
                     trace_id=decision.trace_id,
                     correlation_id=decision.correlation_id,
                     metadata={"execution_status": "executed", "arguments": arguments},
+                    tenant_id=effective_tenant,
                 )
                 if hasattr(self, "metrics_collector") and self.metrics_collector:
                     self.metrics_collector.record_execution("executed", duration_ms=duration_ms)
@@ -1910,7 +1976,8 @@ class Shield:
                         arguments,
                         execution_status="error",
                         error=err_msg,
-                        policy_version_hash=policy_hash
+                        policy_version_hash=policy_hash,
+                        tenant_id=effective_tenant,
                     )
                 except Exception:
                     pass
@@ -1925,6 +1992,7 @@ class Shield:
                 trace_id=decision.trace_id,
                 correlation_id=decision.correlation_id,
                 metadata={"execution_status": "error", "error": err_msg, "arguments": arguments},
+                tenant_id=effective_tenant,
             )
             if hasattr(self, "metrics_collector") and self.metrics_collector:
                 self.metrics_collector.record_execution(status_str, duration_ms=duration_ms)

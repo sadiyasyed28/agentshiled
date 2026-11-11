@@ -152,6 +152,7 @@ class AuditRecord:
     record_hash: Optional[str] = None
     correlation_id: Optional[str] = None
     trace_id: Optional[str] = None
+    tenant_id: str = "default"
 
 class AuditStore(ABC):
     """Abstract Audit Storage interface (allows replacing SQLite with PostgreSQL later)."""
@@ -164,6 +165,9 @@ class AuditStore(ABC):
         execution_status: str = "not_executed",
         error: Optional[str] = None,
         policy_version_hash: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        tenant_id: str = "default",
     ) -> int:
         """Logs an authorization decision and its execution status."""
         pass
@@ -178,6 +182,7 @@ class AuditStore(ABC):
         end_time: Optional[str] = None,
         correlation_id: Optional[str] = None,
         limit: int = 50,
+        tenant_id: Optional[str] = None,
     ) -> List[AuditRecord]:
         """Queries stored audit events with filtering."""
         pass
@@ -267,6 +272,8 @@ class SQLiteAuditStore(AuditStore):
                     cursor.execute("ALTER TABLE audit_logs ADD COLUMN correlation_id TEXT;")
                 if "trace_id" not in columns:
                     cursor.execute("ALTER TABLE audit_logs ADD COLUMN trace_id TEXT;")
+                if "tenant_id" not in columns:
+                    cursor.execute("ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
 
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_logs(decision);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_logs(agent);")
@@ -274,6 +281,7 @@ class SQLiteAuditStore(AuditStore):
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_record_hash ON audit_logs(record_hash);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_correlation_id ON audit_logs(correlation_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id, timestamp);")
                 conn.commit()
             except Exception:
                 try:
@@ -293,6 +301,7 @@ class SQLiteAuditStore(AuditStore):
         policy_version_hash: Optional[str] = None,
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
+        tenant_id: str = "default",
     ) -> int:
         cleaned_args = redact_sensitive_data(arguments or {})
         cleaned_error = redact_sensitive_data(error) if error is not None else None
@@ -307,6 +316,7 @@ class SQLiteAuditStore(AuditStore):
         risk_factors_json = json.dumps([])
         corr_id = correlation_id or getattr(decision, "correlation_id", None)
         trc_id = trace_id or getattr(decision, "trace_id", None)
+        eff_tenant = getattr(decision, "tenant_id", None) or tenant_id or "default"
 
         with self._lock:
             conn = self._get_connection()
@@ -341,8 +351,8 @@ class SQLiteAuditStore(AuditStore):
                         timestamp, agent, tool, arguments, decision, allowed,
                         reasons, rules_triggered, risk_score, severity,
                         risk_factors, execution_status, error, policy_version_hash,
-                        prev_hash, record_hash, correlation_id, trace_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        prev_hash, record_hash, correlation_id, trace_id, tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     timestamp,
                     decision.agent,
@@ -362,6 +372,7 @@ class SQLiteAuditStore(AuditStore):
                     record_hash,
                     corr_id,
                     trc_id,
+                    eff_tenant,
                 ))
                 row_id = cursor.lastrowid or 0
                 conn.commit()
@@ -384,6 +395,7 @@ class SQLiteAuditStore(AuditStore):
         end_time: Optional[str] = None,
         correlation_id: Optional[str] = None,
         limit: int = 50,
+        tenant_id: Optional[str] = None,
     ) -> List[AuditRecord]:
         conditions: List[str] = []
         params: List[Any] = []
@@ -406,13 +418,16 @@ class SQLiteAuditStore(AuditStore):
         if correlation_id:
             conditions.append("correlation_id = ?")
             params.append(correlation_id)
+        if tenant_id is not None:
+            conditions.append("tenant_id = ?")
+            params.append(tenant_id)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         query_sql = f"""
             SELECT id, timestamp, agent, tool, arguments, decision, allowed,
                    reasons, rules_triggered, risk_score, severity, risk_factors,
                    execution_status, error, policy_version_hash, prev_hash, record_hash,
-                   correlation_id, trace_id
+                   correlation_id, trace_id, tenant_id
             FROM audit_logs
             {where_clause}
             ORDER BY id DESC
@@ -448,6 +463,7 @@ class SQLiteAuditStore(AuditStore):
                         record_hash=row["record_hash"] if "record_hash" in row_keys else None,
                         correlation_id=row["correlation_id"] if "correlation_id" in row_keys else None,
                         trace_id=row["trace_id"] if "trace_id" in row_keys else None,
+                        tenant_id=row["tenant_id"] if "tenant_id" in row_keys else "default",
                     )
                 )
             return records

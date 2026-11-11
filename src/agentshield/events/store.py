@@ -84,7 +84,7 @@ class EventStore(ABC):
         pass
 
     @abstractmethod
-    def get_event(self, event_id: str) -> Optional[SecurityEvent]:
+    def get_event(self, event_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityEvent]:
         pass
 
     @abstractmethod
@@ -101,6 +101,7 @@ class EventStore(ABC):
         end_time: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityEvent]:
         pass
 
@@ -118,7 +119,7 @@ class EventStore(ABC):
         pass
 
     @abstractmethod
-    def get_alert(self, alert_id: str) -> Optional[SecurityAlert]:
+    def get_alert(self, alert_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityAlert]:
         pass
 
     @abstractmethod
@@ -132,6 +133,7 @@ class EventStore(ABC):
         incident_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityAlert]:
         pass
 
@@ -142,6 +144,7 @@ class EventStore(ABC):
         status: str,
         actor: str,
         note: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityAlert]:
         pass
 
@@ -150,7 +153,7 @@ class EventStore(ABC):
         pass
 
     @abstractmethod
-    def get_incident(self, incident_id: str) -> Optional[SecurityIncident]:
+    def get_incident(self, incident_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityIncident]:
         pass
 
     @abstractmethod
@@ -166,6 +169,7 @@ class EventStore(ABC):
         correlation_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityIncident]:
         pass
 
@@ -179,6 +183,7 @@ class EventStore(ABC):
         increment_event_count: int = 0,
         assigned_to: Optional[str] = None,
         resolution_summary: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityIncident]:
         pass
 
@@ -287,6 +292,14 @@ class SQLiteEventStore(EventStore):
                     );
                 """)
 
+                # Ensure tenant_id column exists on all tables
+                for tbl in ("security_events", "security_alerts", "security_incidents"):
+                    cursor = conn.cursor()
+                    cursor.execute(f"PRAGMA table_info({tbl});")
+                    cols = [c["name"] for c in cursor.fetchall()]
+                    if "tenant_id" not in cols:
+                        cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
+
                 # Indexes
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_evt_event_id ON security_events(event_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_evt_agent_id ON security_events(agent_id);")
@@ -295,6 +308,7 @@ class SQLiteEventStore(EventStore):
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_evt_sev ON security_events(severity);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_evt_corr ON security_events(correlation_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_evt_ts ON security_events(timestamp);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_evt_tenant ON security_events(tenant_id);")
 
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_alt_alert_id ON security_alerts(alert_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_alt_status ON security_alerts(status);")
@@ -302,11 +316,13 @@ class SQLiteEventStore(EventStore):
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_alt_agent ON security_alerts(agent_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_alt_corr ON security_alerts(correlation_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_alt_inc ON security_alerts(incident_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_alt_tenant ON security_alerts(tenant_id);")
 
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_inc_incident_id ON security_incidents(incident_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_inc_status ON security_incidents(status);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_inc_sev ON security_incidents(severity);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_inc_corr ON security_incidents(correlation_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_inc_tenant ON security_incidents(tenant_id);")
                 conn.commit()
             except Exception:
                 try:
@@ -323,6 +339,7 @@ class SQLiteEventStore(EventStore):
         return cleaned if isinstance(cleaned, dict) else {"data": cleaned}
 
     def _row_to_event(self, row: sqlite3.Row) -> SecurityEvent:
+        row_keys = row.keys()
         return SecurityEvent(
             event_id=row["event_id"],
             timestamp=row["timestamp"],
@@ -336,9 +353,11 @@ class SQLiteEventStore(EventStore):
             trace_id=row["trace_id"],
             correlation_id=row["correlation_id"],
             metadata=json.loads(row["metadata"]),
+            tenant_id=row["tenant_id"] if "tenant_id" in row_keys else "default",
         )
 
     def _row_to_alert(self, row: sqlite3.Row) -> SecurityAlert:
+        row_keys = row.keys()
         return SecurityAlert(
             alert_id=row["alert_id"],
             timestamp=row["timestamp"],
@@ -358,9 +377,11 @@ class SQLiteEventStore(EventStore):
             resolved_by=row["resolved_by"],
             resolution_note=row["resolution_note"],
             metadata=json.loads(row["metadata"]),
+            tenant_id=row["tenant_id"] if "tenant_id" in row_keys else "default",
         )
 
     def _row_to_incident(self, row: sqlite3.Row) -> SecurityIncident:
+        row_keys = row.keys()
         return SecurityIncident(
             incident_id=row["incident_id"],
             created_at=row["created_at"],
@@ -376,12 +397,14 @@ class SQLiteEventStore(EventStore):
             assigned_to=row["assigned_to"],
             resolution_summary=row["resolution_summary"],
             metadata=json.loads(row["metadata"]),
+            tenant_id=row["tenant_id"] if "tenant_id" in row_keys else "default",
         )
 
     # Event operations
     def record_event(self, event: SecurityEvent) -> None:
         sanitized_meta = self._sanitize_meta(event.metadata)
         sanitized_evidence = [redact_sensitive_data(e) for e in event.evidence]
+        eff_tenant = getattr(event, "tenant_id", "default") or "default"
         with self._lock:
             conn = self._get_connection()
             try:
@@ -391,8 +414,8 @@ class SQLiteEventStore(EventStore):
                     INSERT INTO security_events (
                         event_id, timestamp, agent_id, tool, event_type,
                         severity, decision, risk_score, evidence, trace_id,
-                        correlation_id, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        correlation_id, metadata, tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.event_id,
@@ -407,6 +430,7 @@ class SQLiteEventStore(EventStore):
                         event.trace_id,
                         event.correlation_id,
                         json.dumps(sanitized_meta),
+                        eff_tenant,
                     ),
                 )
                 conn.commit()
@@ -419,12 +443,15 @@ class SQLiteEventStore(EventStore):
             finally:
                 self._close_connection(conn)
 
-    def get_event(self, event_id: str) -> Optional[SecurityEvent]:
+    def get_event(self, event_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityEvent]:
         with self._lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute("SELECT * FROM security_events WHERE event_id = ?", (event_id,))
+                if tenant_id is not None:
+                    cursor.execute("SELECT * FROM security_events WHERE event_id = ? AND tenant_id = ?", (event_id, tenant_id))
+                else:
+                    cursor.execute("SELECT * FROM security_events WHERE event_id = ?", (event_id,))
                 row = cursor.fetchone()
                 return self._row_to_event(row) if row else None
             finally:
@@ -443,11 +470,17 @@ class SQLiteEventStore(EventStore):
         end_time: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityEvent]:
         query = "SELECT * FROM security_events WHERE 1=1"
         params: List[Any] = []
 
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
         if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
             query += " AND agent_id = ?"
             params.append(agent_id)
         if tool:
@@ -496,6 +529,7 @@ class SQLiteEventStore(EventStore):
     # Alert operations
     def create_alert(self, alert: SecurityAlert) -> None:
         sanitized_meta = self._sanitize_meta(alert.metadata)
+        eff_tenant = getattr(alert, "tenant_id", "default") or "default"
         with self._lock:
             conn = self._get_connection()
             try:
@@ -506,8 +540,8 @@ class SQLiteEventStore(EventStore):
                         alert_id, timestamp, title, description, alert_type,
                         severity, status, agent_id, trigger_event_id, event_ids,
                         correlation_id, incident_id, acknowledged_at, acknowledged_by,
-                        resolved_at, resolved_by, resolution_note, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        resolved_at, resolved_by, resolution_note, metadata, tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         alert.alert_id,
@@ -528,6 +562,7 @@ class SQLiteEventStore(EventStore):
                         alert.resolved_by,
                         alert.resolution_note,
                         json.dumps(sanitized_meta),
+                        eff_tenant,
                     ),
                 )
                 conn.commit()
@@ -545,6 +580,8 @@ class SQLiteEventStore(EventStore):
         within a single BEGIN IMMEDIATE transaction to prevent multi-process race conditions."""
         sanitized_meta = self._sanitize_meta(alert.metadata)
         now_ts = datetime.now(timezone.utc).isoformat()
+        eff_tenant = getattr(alert, "tenant_id", None) or getattr(trigger_event, "tenant_id", "default") or "default"
+        alert.tenant_id = eff_tenant
         with self._lock:
             conn = self._get_connection()
             try:
@@ -553,8 +590,8 @@ class SQLiteEventStore(EventStore):
 
                 # 1. Check existing incident for this correlation_id atomically
                 cursor.execute(
-                    "SELECT * FROM security_incidents WHERE correlation_id = ? ORDER BY id DESC LIMIT 1;",
-                    (alert.correlation_id,),
+                    "SELECT * FROM security_incidents WHERE correlation_id = ? AND tenant_id = ? ORDER BY id DESC LIMIT 1;",
+                    (alert.correlation_id, eff_tenant),
                 )
                 existing_inc_row = cursor.fetchone()
 
@@ -588,8 +625,8 @@ class SQLiteEventStore(EventStore):
                         INSERT INTO security_incidents (
                             incident_id, created_at, updated_at, title, description,
                             severity, status, correlation_id, agent_id, alert_ids,
-                            event_count, assigned_to, resolution_summary, metadata
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            event_count, assigned_to, resolution_summary, metadata, tenant_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             inc_id,
@@ -606,6 +643,7 @@ class SQLiteEventStore(EventStore):
                             None,
                             None,
                             json.dumps(self._sanitize_meta(inc_meta)),
+                            eff_tenant,
                         ),
                     )
 
@@ -616,8 +654,8 @@ class SQLiteEventStore(EventStore):
                         alert_id, timestamp, title, description, alert_type,
                         severity, status, agent_id, trigger_event_id, event_ids,
                         correlation_id, incident_id, acknowledged_at, acknowledged_by,
-                        resolved_at, resolved_by, resolution_note, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        resolved_at, resolved_by, resolution_note, metadata, tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         alert.alert_id,
@@ -638,6 +676,7 @@ class SQLiteEventStore(EventStore):
                         alert.resolved_by,
                         alert.resolution_note,
                         json.dumps(sanitized_meta),
+                        eff_tenant,
                     ),
                 )
                 conn.commit()
@@ -651,12 +690,15 @@ class SQLiteEventStore(EventStore):
             finally:
                 self._close_connection(conn)
 
-    def get_alert(self, alert_id: str) -> Optional[SecurityAlert]:
+    def get_alert(self, alert_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityAlert]:
         with self._lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute("SELECT * FROM security_alerts WHERE alert_id = ?", (alert_id,))
+                if tenant_id is not None:
+                    cursor.execute("SELECT * FROM security_alerts WHERE alert_id = ? AND tenant_id = ?", (alert_id, tenant_id))
+                else:
+                    cursor.execute("SELECT * FROM security_alerts WHERE alert_id = ?", (alert_id,))
                 row = cursor.fetchone()
                 return self._row_to_alert(row) if row else None
             finally:
@@ -672,10 +714,14 @@ class SQLiteEventStore(EventStore):
         incident_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityAlert]:
         query = "SELECT * FROM security_alerts WHERE 1=1"
         params: List[Any] = []
 
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
         if status:
             query += " AND status = ?"
             params.append(status)
@@ -716,6 +762,7 @@ class SQLiteEventStore(EventStore):
         status: str,
         actor: str,
         note: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityAlert]:
         now_ts = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -723,7 +770,10 @@ class SQLiteEventStore(EventStore):
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 cursor = conn.cursor()
-                cursor.execute("SELECT * FROM security_alerts WHERE alert_id = ?", (alert_id,))
+                if tenant_id is not None:
+                    cursor.execute("SELECT * FROM security_alerts WHERE alert_id = ? AND tenant_id = ?", (alert_id, tenant_id))
+                else:
+                    cursor.execute("SELECT * FROM security_alerts WHERE alert_id = ?", (alert_id,))
                 row = cursor.fetchone()
                 if not row:
                     conn.commit()
@@ -775,6 +825,7 @@ class SQLiteEventStore(EventStore):
     # Incident operations
     def create_incident(self, incident: SecurityIncident) -> None:
         sanitized_meta = self._sanitize_meta(incident.metadata)
+        eff_tenant = getattr(incident, "tenant_id", "default") or "default"
         with self._lock:
             conn = self._get_connection()
             try:
@@ -784,8 +835,8 @@ class SQLiteEventStore(EventStore):
                     INSERT INTO security_incidents (
                         incident_id, created_at, updated_at, title, description,
                         severity, status, correlation_id, agent_id, alert_ids,
-                        event_count, assigned_to, resolution_summary, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        event_count, assigned_to, resolution_summary, metadata, tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         incident.incident_id,
@@ -802,6 +853,7 @@ class SQLiteEventStore(EventStore):
                         incident.assigned_to,
                         incident.resolution_summary,
                         json.dumps(sanitized_meta),
+                        eff_tenant,
                     ),
                 )
                 conn.commit()
@@ -814,12 +866,15 @@ class SQLiteEventStore(EventStore):
             finally:
                 self._close_connection(conn)
 
-    def get_incident(self, incident_id: str) -> Optional[SecurityIncident]:
+    def get_incident(self, incident_id: str, tenant_id: Optional[str] = None) -> Optional[SecurityIncident]:
         with self._lock:
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute("SELECT * FROM security_incidents WHERE incident_id = ?", (incident_id,))
+                if tenant_id is not None:
+                    cursor.execute("SELECT * FROM security_incidents WHERE incident_id = ? AND tenant_id = ?", (incident_id, tenant_id))
+                else:
+                    cursor.execute("SELECT * FROM security_incidents WHERE incident_id = ?", (incident_id,))
                 row = cursor.fetchone()
                 return self._row_to_incident(row) if row else None
             finally:
@@ -847,10 +902,14 @@ class SQLiteEventStore(EventStore):
         correlation_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        tenant_id: Optional[str] = None,
     ) -> List[SecurityIncident]:
         query = "SELECT * FROM security_incidents WHERE 1=1"
         params: List[Any] = []
 
+        if tenant_id is not None:
+            query += " AND tenant_id = ?"
+            params.append(tenant_id)
         if status:
             query += " AND status = ?"
             params.append(status)
@@ -888,6 +947,7 @@ class SQLiteEventStore(EventStore):
         increment_event_count: int = 0,
         assigned_to: Optional[str] = None,
         resolution_summary: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityIncident]:
         now_ts = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -895,7 +955,10 @@ class SQLiteEventStore(EventStore):
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 cursor = conn.cursor()
-                cursor.execute("SELECT * FROM security_incidents WHERE incident_id = ?", (incident_id,))
+                if tenant_id is not None:
+                    cursor.execute("SELECT * FROM security_incidents WHERE incident_id = ? AND tenant_id = ?", (incident_id, tenant_id))
+                else:
+                    cursor.execute("SELECT * FROM security_incidents WHERE incident_id = ?", (incident_id,))
                 row = cursor.fetchone()
                 if not row:
                     conn.commit()

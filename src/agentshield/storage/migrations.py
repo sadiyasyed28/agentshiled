@@ -262,6 +262,38 @@ def _migration_003_audit_correlation_tracing(cursor: Any) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_correlation_id ON audit_logs(correlation_id);")
 
 
+def _migration_004_tenant_isolation_schema(cursor: Any) -> None:
+    """Migration 004: Add tenant_id and role columns across all persistent stores."""
+    # 1. Audit logs
+    cursor.execute("ALTER TABLE IF EXISTS audit_logs ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(128) NOT NULL DEFAULT 'default';")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id);")
+
+    # 2. Reviews
+    for tbl in ("reviews", "sim_reviews"):
+        cursor.execute(f"ALTER TABLE IF EXISTS {tbl} ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(128) NOT NULL DEFAULT 'default';")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{tbl}_tenant ON {tbl}(tenant_id);")
+
+    # 3. Active sessions
+    cursor.execute("ALTER TABLE IF EXISTS active_sessions ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(128) NOT NULL DEFAULT 'default';")
+    cursor.execute("ALTER TABLE IF EXISTS active_sessions ADD COLUMN IF NOT EXISTS role VARCHAR(64) NOT NULL DEFAULT 'tenant_admin';")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON active_sessions(tenant_id);")
+
+    # 4. Security events, alerts, incidents
+    for pfx in ("", "sim_"):
+        events_tbl = f"{pfx}security_events"
+        alerts_tbl = f"{pfx}security_alerts"
+        incidents_tbl = f"{pfx}security_incidents"
+
+        cursor.execute(f"ALTER TABLE IF EXISTS {events_tbl} ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(128) NOT NULL DEFAULT 'default';")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{events_tbl}_tenant ON {events_tbl}(tenant_id);")
+
+        cursor.execute(f"ALTER TABLE IF EXISTS {alerts_tbl} ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(128) NOT NULL DEFAULT 'default';")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{alerts_tbl}_tenant ON {alerts_tbl}(tenant_id);")
+
+        cursor.execute(f"ALTER TABLE IF EXISTS {incidents_tbl} ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(128) NOT NULL DEFAULT 'default';")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{incidents_tbl}_tenant ON {incidents_tbl}(tenant_id);")
+
+
 # Registry of ordered schema migrations
 MIGRATIONS: List[Migration] = [
     Migration(
@@ -278,6 +310,11 @@ MIGRATIONS: List[Migration] = [
         version=3,
         name="003_audit_correlation_tracing",
         up=_migration_003_audit_correlation_tracing,
+    ),
+    Migration(
+        version=4,
+        name="004_tenant_isolation_schema",
+        up=_migration_004_tenant_isolation_schema,
     ),
 ]
 

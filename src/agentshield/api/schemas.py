@@ -47,11 +47,13 @@ class ExecutionResponse(BaseModel):
 
 class PauseAgentRequest(BaseModel):
     agent: str = Field(..., max_length=256)
+    tenant_id: Optional[str] = Field(None, max_length=128)
 
 class ReviewActionRequest(BaseModel):
     review_id: str
     action: str = Field("approve", description="'approve' or 'reject'")
     reason: Optional[str] = None
+    tenant_id: Optional[str] = Field(None, max_length=128)
 
 class EventItem(BaseModel):
     id: int
@@ -72,6 +74,7 @@ class EventItem(BaseModel):
     record_hash: Optional[str] = None
     correlation_id: Optional[str] = None
     trace_id: Optional[str] = None
+    tenant_id: Optional[str] = "default"
 
 class EventsResponse(BaseModel):
     events: List[EventItem]
@@ -96,6 +99,7 @@ class SecurityEventModel(BaseModel):
     trace_id: str
     correlation_id: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    tenant_id: Optional[str] = "default"
 
 class SecurityEventsResponse(BaseModel):
     events: List[SecurityEventModel]
@@ -120,6 +124,7 @@ class SecurityAlertModel(BaseModel):
     resolved_by: Optional[str] = None
     resolution_note: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    tenant_id: Optional[str] = "default"
 
 class SecurityAlertsResponse(BaseModel):
     alerts: List[SecurityAlertModel]
@@ -140,6 +145,7 @@ class SecurityIncidentModel(BaseModel):
     assigned_to: Optional[str] = None
     resolution_summary: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    tenant_id: Optional[str] = "default"
 
 class SecurityIncidentsResponse(BaseModel):
     incidents: List[SecurityIncidentModel]
@@ -159,6 +165,7 @@ class AnalysisReportsListResponse(BaseModel):
 
 class AuthLoginRequest(BaseModel):
     admin_key: str = Field(..., max_length=1024, description="Administrative authentication key")
+    tenant_id: Optional[str] = Field(None, max_length=128, description="Target tenant ID (optional)")
 
 class AuthSessionResponse(BaseModel):
     authenticated: bool
@@ -166,6 +173,8 @@ class AuthSessionResponse(BaseModel):
     admin_configured: bool = False
     expires_at: Optional[float] = None
     csrf_token: Optional[str] = None
+    tenant_id: Optional[str] = "default"
+    role: Optional[str] = "tenant_admin"
 
 class OverviewStatsResponse(BaseModel):
     total_evaluated: int
@@ -181,6 +190,8 @@ class OverviewStatsResponse(BaseModel):
     review: int = 0
     block: int = 0
     total: int = 0
+    tenant_id: Optional[str] = "default"
+    simulated: bool = False
 
 class ScenarioModel(BaseModel):
     id: str

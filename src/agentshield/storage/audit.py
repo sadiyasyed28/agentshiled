@@ -57,15 +57,18 @@ class PostgresAuditStore(AuditStore):
                     prev_hash VARCHAR(128),
                     record_hash VARCHAR(128),
                     correlation_id VARCHAR(128),
-                    trace_id VARCHAR(128)
+                    trace_id VARCHAR(128),
+                    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default'
                 );
             """)
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(64) NOT NULL DEFAULT 'default';")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_logs(decision);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_logs(agent);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tool ON audit_logs(tool);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_record_hash ON audit_logs(record_hash);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_correlation_id ON audit_logs(correlation_id);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id, timestamp DESC);")
 
     def log_decision(
         self,
@@ -74,6 +77,9 @@ class PostgresAuditStore(AuditStore):
         execution_status: str = "not_executed",
         error: Optional[str] = None,
         policy_version_hash: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        tenant_id: str = "default",
     ) -> int:
         cleaned_args = redact_sensitive_data(arguments or {})
         cleaned_error = redact_sensitive_data(error) if error is not None else None
@@ -118,13 +124,14 @@ class PostgresAuditStore(AuditStore):
                 policy_version_hash=policy_version_hash,
             )
 
+            eff_tenant = getattr(decision, "tenant_id", None) or tenant_id or "default"
             cursor.execute("""
                 INSERT INTO audit_logs (
                     timestamp, agent, tool, arguments, decision, allowed,
                     reasons, rules_triggered, risk_score, severity,
                     risk_factors, execution_status, error, policy_version_hash,
-                    prev_hash, record_hash, correlation_id, trace_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    prev_hash, record_hash, correlation_id, trace_id, tenant_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
             """, (
                 timestamp,
@@ -143,8 +150,9 @@ class PostgresAuditStore(AuditStore):
                 policy_version_hash,
                 prev_hash,
                 record_hash,
-                getattr(decision, "correlation_id", None),
-                getattr(decision, "trace_id", None),
+                correlation_id or getattr(decision, "correlation_id", None),
+                trace_id or getattr(decision, "trace_id", None),
+                eff_tenant,
             ))
             row = cursor.fetchone()
             return int(row[0]) if row else 0
@@ -158,6 +166,7 @@ class PostgresAuditStore(AuditStore):
         end_time: Optional[str] = None,
         correlation_id: Optional[str] = None,
         limit: int = 50,
+        tenant_id: Optional[str] = None,
     ) -> List[AuditRecord]:
         conditions: List[str] = []
         params: List[Any] = []
@@ -180,13 +189,16 @@ class PostgresAuditStore(AuditStore):
         if correlation_id:
             conditions.append("correlation_id = %s")
             params.append(correlation_id)
+        if tenant_id is not None:
+            conditions.append("tenant_id = %s")
+            params.append(tenant_id)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         query_sql = f"""
             SELECT id, timestamp, agent, tool, arguments, decision, allowed,
                    reasons, rules_triggered, risk_score, severity, risk_factors,
                    execution_status, error, policy_version_hash, prev_hash, record_hash,
-                   correlation_id, trace_id
+                   correlation_id, trace_id, tenant_id
             FROM audit_logs
             {where_clause}
             ORDER BY id DESC
@@ -222,6 +234,7 @@ class PostgresAuditStore(AuditStore):
                         record_hash=row_dict.get("record_hash"),
                         correlation_id=row_dict.get("correlation_id"),
                         trace_id=row_dict.get("trace_id"),
+                        tenant_id=row_dict.get("tenant_id", "default"),
                     )
                 )
         return records

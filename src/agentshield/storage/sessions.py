@@ -30,22 +30,37 @@ class PostgresSessionStore:
                     "user" VARCHAR(128) NOT NULL,
                     created_at DOUBLE PRECISION NOT NULL,
                     expires_at DOUBLE PRECISION NOT NULL,
-                    revoked INTEGER NOT NULL DEFAULT 0
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default',
+                    role VARCHAR(64) NOT NULL DEFAULT 'tenant_admin'
                 );
             """)
+            cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(64) NOT NULL DEFAULT 'default';")
+            cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS role VARCHAR(64) NOT NULL DEFAULT 'tenant_admin';")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON sessions(tenant_id);")
 
-    def save_session(self, token_hash: str, user: str, created_at: float, expires_at: float) -> None:
+    def save_session(
+        self,
+        token_hash: str,
+        user: str,
+        created_at: float,
+        expires_at: float,
+        tenant_id: str = "default",
+        role: str = "tenant_admin",
+    ) -> None:
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO sessions (token_hash, "user", created_at, expires_at, revoked)
-                VALUES (%s, %s, %s, %s, 0)
+                INSERT INTO sessions (token_hash, "user", created_at, expires_at, revoked, tenant_id, role)
+                VALUES (%s, %s, %s, %s, 0, %s, %s)
                 ON CONFLICT (token_hash) DO UPDATE SET
                     "user" = EXCLUDED."user",
                     expires_at = EXCLUDED.expires_at,
-                    revoked = 0;
-            """, (token_hash, user, created_at, expires_at))
+                    revoked = 0,
+                    tenant_id = EXCLUDED.tenant_id,
+                    role = EXCLUDED.role;
+            """, (token_hash, user, created_at, expires_at, tenant_id, role))
 
     def is_revoked(self, token_hash: str) -> bool:
         with self.connection_manager.get_connection() as conn:
@@ -70,6 +85,27 @@ class PostgresSessionStore:
                     VALUES (%s, 'unknown', %s, %s, 1);
                 """, (token_hash, now, now + 86400))
             return True
+
+    def get_session(self, token_hash: str) -> Optional[Any]:
+        with self.connection_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT token_hash, "user", created_at, expires_at, revoked, tenant_id, role FROM sessions WHERE token_hash = %s;',
+                (token_hash,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            from agentshield.api.sessions import SessionRecord
+            return SessionRecord(
+                token_hash=row[0],
+                user=row[1],
+                created_at=float(row[2]),
+                expires_at=float(row[3]),
+                revoked=bool(row[4]),
+                tenant_id=row[5] if len(row) > 5 else "default",
+                role=row[6] if len(row) > 6 else "tenant_admin",
+            )
 
     def cleanup_expired(self) -> int:
         now = time.time()
