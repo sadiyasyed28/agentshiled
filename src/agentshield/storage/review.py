@@ -62,12 +62,15 @@ class PostgresReviewStore(ReviewStore):
                     executed_at DOUBLE PRECISION,
                     execution_worker_id VARCHAR(128),
                     lease_expires_at DOUBLE PRECISION,
-                    updated_at DOUBLE PRECISION NOT NULL
+                    updated_at DOUBLE PRECISION NOT NULL,
+                    tenant_id VARCHAR(64) NOT NULL DEFAULT 'default'
                 );
             """)
+            cursor.execute(f"ALTER TABLE {self.table_name} ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(64) NOT NULL DEFAULT 'default';")
             cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_name}_status ON {self.table_name}(status);")
             cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_name}_expires ON {self.table_name}(expires_at);")
             cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_name}_idemp ON {self.table_name}(idempotency_key);")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_name}_tenant ON {self.table_name}(tenant_id, status);")
 
     def enqueue_review(
         self,
@@ -80,6 +83,7 @@ class PostgresReviewStore(ReviewStore):
         created_at: float,
         expires_at: float,
         idempotency_key: Optional[str] = None,
+        tenant_id: str = "default",
     ) -> None:
         now = time.time()
         cleaned_args = sanitize_arguments_for_storage(arguments)
@@ -99,8 +103,8 @@ class PostgresReviewStore(ReviewStore):
                 INSERT INTO {self.table_name} (
                     review_id, agent, tool, arguments, permissions, decision,
                     created_at, expires_at, status, execution_status,
-                    idempotency_key, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'not_started', %s, %s);
+                    idempotency_key, updated_at, tenant_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'not_started', %s, %s, %s);
             """, (
                 review_id,
                 agent,
@@ -112,6 +116,7 @@ class PostgresReviewStore(ReviewStore):
                 expires_at,
                 idempotency_key,
                 now,
+                tenant_id,
             ))
 
     def _row_to_dict(self, row_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -134,12 +139,21 @@ class PostgresReviewStore(ReviewStore):
             "execution_worker_id": row_dict.get("execution_worker_id"),
             "lease_expires_at": row_dict.get("lease_expires_at"),
             "updated_at": row_dict.get("updated_at"),
+            "tenant_id": row_dict.get("tenant_id", "default"),
         }
 
-    def get_review(self, review_id: str, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def get_review(
+        self,
+        review_id: str,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT * FROM {self.table_name} WHERE review_id = %s;", (review_id,))
+            if tenant_id is not None:
+                cursor.execute(f"SELECT * FROM {self.table_name} WHERE review_id = %s AND tenant_id = %s;", (review_id, tenant_id))
+            else:
+                cursor.execute(f"SELECT * FROM {self.table_name} WHERE review_id = %s;", (review_id,))
             col_names = [d[0] for d in cursor.description] if cursor.description else []
             row = cursor.fetchone()
             if not row:
@@ -161,15 +175,26 @@ class PostgresReviewStore(ReviewStore):
             return None
         return item.get("execution_status")
 
-    def get_pending_reviews(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+    def get_pending_reviews(
+        self,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         current_time = now if now is not None else time.time()
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"""
-                SELECT * FROM {self.table_name}
-                WHERE status = 'pending' AND expires_at >= %s
-                ORDER BY created_at ASC;
-            """, (current_time,))
+            if tenant_id is not None:
+                cursor.execute(f"""
+                    SELECT * FROM {self.table_name}
+                    WHERE status = 'pending' AND expires_at >= %s AND tenant_id = %s
+                    ORDER BY created_at ASC;
+                """, (current_time, tenant_id))
+            else:
+                cursor.execute(f"""
+                    SELECT * FROM {self.table_name}
+                    WHERE status = 'pending' AND expires_at >= %s
+                    ORDER BY created_at ASC;
+                """, (current_time,))
             col_names = [d[0] for d in cursor.description] if cursor.description else []
             return [self._row_to_dict(dict(zip(col_names, r))) for r in cursor.fetchall()]
 
@@ -222,6 +247,7 @@ class PostgresReviewStore(ReviewStore):
         worker_id: Optional[str] = None,
         lease_duration: float = 60.0,
         allow_idempotent_retry: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         current_time = now if now is not None else time.time()
         worker = worker_id or f"worker_{os.getpid()}_{uuid.uuid4().hex[:8]}"
@@ -241,6 +267,10 @@ class PostgresReviewStore(ReviewStore):
             if not row:
                 return None
             item = self._row_to_dict(dict(zip(col_names, row)))
+
+            # Tenant boundary enforcement: prevent cross-tenant approval (IDOR)
+            if tenant_id is not None and item.get("tenant_id", "default") != tenant_id:
+                return None
 
             status = item["status"]
             exec_state = item["execution_status"]
@@ -286,7 +316,12 @@ class PostgresReviewStore(ReviewStore):
             return None
 
     def claim_and_reject(
-        self, review_id: str, reviewer: str, reason: str, now: Optional[float] = None
+        self,
+        review_id: str,
+        reviewer: str,
+        reason: str,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         current_time = now if now is not None else time.time()
         with self.connection_manager.get_connection() as conn:
@@ -301,6 +336,10 @@ class PostgresReviewStore(ReviewStore):
             if not row:
                 return None
             item = self._row_to_dict(dict(zip(col_names, row)))
+
+            # Tenant boundary enforcement: prevent cross-tenant rejection
+            if tenant_id is not None and item.get("tenant_id", "default") != tenant_id:
+                return None
 
             if item["status"] != "pending":
                 return None

@@ -122,6 +122,7 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
 def create_app(
     audit_db_path: Optional[str] = None,
     admin_api_key: Optional[str] = None,
+    tenant_api_keys: Optional[Dict[str, str]] = None,
     read_only: Optional[bool] = None,
     review_db_path: Optional[str] = None,
     events_db_path: Optional[str] = None,
@@ -171,6 +172,22 @@ def create_app(
 
     # Auth configuration & read-only flag from env or params
     configured_admin_key = admin_api_key or os.environ.get("AGENTSHIELD_ADMIN_KEY")
+    configured_tenant_keys: Dict[str, str] = {}
+    if tenant_api_keys:
+        configured_tenant_keys.update(tenant_api_keys)
+    tenant_keys_env = os.environ.get("AGENTSHIELD_TENANT_KEYS")
+    if tenant_keys_env:
+        try:
+            import json
+            parsed = json.loads(tenant_keys_env)
+            if isinstance(parsed, dict):
+                configured_tenant_keys.update(parsed)
+        except Exception:
+            for pair in tenant_keys_env.split(","):
+                if ":" in pair:
+                    t_id, t_key = pair.split(":", 1)
+                    configured_tenant_keys[t_id.strip()] = t_key.strip()
+
     is_read_only = read_only if read_only is not None else (
         (os.environ.get("AGENTSHIELD_READONLY") or os.environ.get("AGENTSHIELD_READ_ONLY") or "false").lower() in ("true", "1", "yes")
     )
@@ -202,8 +219,12 @@ def create_app(
 
     session_secret = os.environ.get("AGENTSHIELD_SESSION_SECRET")
     session_manager = (
-        SessionManager(admin_key=configured_admin_key, store=session_store, session_secret=session_secret)
-        if configured_admin_key
+        SessionManager(
+            admin_key=configured_admin_key or "session_key_placeholder",
+            store=session_store,
+            session_secret=session_secret,
+        )
+        if (configured_admin_key or configured_tenant_keys)
         else None
     )
 
@@ -370,27 +391,82 @@ def create_app(
             if not csrf_header or not csrf_cookie or not hmac.compare_digest(csrf_header, csrf_cookie):
                 raise HTTPException(status_code=403, detail="Forbidden: CSRF token verification failed")
 
-    def _verify_admin(request: Request) -> str:
-        if not configured_admin_key:
+    class AuthContext:
+        def __init__(self, user_id: str, tenant_id: str = "default", role: str = "tenant_admin"):
+            self.user_id = user_id
+            self.tenant_id = tenant_id
+            self.role = role
+
+        def __str__(self) -> str:
+            return self.user_id
+
+    def _resolve_tenant_id(auth_ctx: Optional[AuthContext], requested_tenant_id: Optional[str] = None) -> str:
+        if not auth_ctx:
+            return requested_tenant_id or "default"
+        if auth_ctx.role == "global_admin":
+            return requested_tenant_id or auth_ctx.tenant_id or "default"
+        if requested_tenant_id and requested_tenant_id != auth_ctx.tenant_id:
             raise HTTPException(
                 status_code=403,
-                detail="Forbidden: Admin endpoints are disabled because AGENTSHIELD_ADMIN_KEY is not configured",
+                detail=f"Forbidden: Cross-tenant access denied. Cannot access tenant '{requested_tenant_id}' with credentials for tenant '{auth_ctx.tenant_id}'.",
             )
-        # 1. Direct header authentication (x-admin-key or Authorization: Bearer ...)
-        auth_header = request.headers.get("x-admin-key") or request.headers.get("authorization", "").replace("Bearer ", "").strip()
-        if auth_header and hmac.compare_digest(auth_header, configured_admin_key):
-            return request.headers.get("x-admin-user", "admin")
+        return auth_ctx.tenant_id
 
-        # 2. Secure signed cookie session
+    def _verify_admin(request: Request) -> AuthContext:
+        auth_header = request.headers.get("x-admin-key") or request.headers.get("x-tenant-key") or request.headers.get("x-api-key") or request.headers.get("authorization", "").replace("Bearer ", "").strip()
+        requested_tenant_header = request.headers.get("x-tenant-id")
+
+        # 1. Direct header authentication: global admin key
+        if configured_admin_key and auth_header and hmac.compare_digest(auth_header, configured_admin_key):
+            admin_user = request.headers.get("x-admin-user", "admin")
+            target_tenant = requested_tenant_header or "default"
+            return AuthContext(user_id=admin_user, tenant_id=target_tenant, role="global_admin")
+
+        # 2. Direct header authentication: per-tenant API key
+        if auth_header and configured_tenant_keys:
+            for t_id, t_key in configured_tenant_keys.items():
+                if hmac.compare_digest(auth_header, t_key):
+                    if requested_tenant_header and requested_tenant_header != t_id:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Forbidden: Key belongs to tenant '{t_id}', cannot access tenant '{requested_tenant_header}'.",
+                        )
+                    return AuthContext(user_id=f"tenant_admin_{t_id}", tenant_id=t_id, role="tenant_admin")
+
+        # 3. Secure signed cookie session
         session_token = request.cookies.get("agentshield_session")
         if session_token and session_manager:
             payload = session_manager.verify_token(session_token)
             if payload:
                 # Cookie authentication requires CSRF verification for state mutations
                 _verify_csrf(request)
-                return payload.get("sub", "admin")
+                t_id = payload.get("tenant_id") or "default"
+                role = payload.get("role") or "tenant_admin"
+                user_id = payload.get("sub", "admin")
+                if role != "global_admin" and requested_tenant_header and requested_tenant_header != t_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Forbidden: Session belongs to tenant '{t_id}', cannot access tenant '{requested_tenant_header}'.",
+                    )
+                return AuthContext(
+                    user_id=user_id,
+                    tenant_id=requested_tenant_header if role == "global_admin" else t_id,
+                    role=role,
+                )
 
+        if not configured_admin_key and not configured_tenant_keys:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Admin endpoints are disabled because AGENTSHIELD_ADMIN_KEY is not configured",
+            )
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid administrative credentials")
+
+    def _get_optional_auth(request: Request) -> Optional[AuthContext]:
+        auth_header = request.headers.get("x-admin-key") or request.headers.get("x-tenant-key") or request.headers.get("x-api-key") or request.headers.get("authorization")
+        session_cookie = request.cookies.get("agentshield_session")
+        if not auth_header and not session_cookie:
+            return None
+        return _verify_admin(request)
 
     def _check_mutation_allowed():
         if is_read_only:
@@ -465,15 +541,39 @@ def create_app(
     # Authentication & Session Endpoints
     @app.post("/api/auth/login", response_model=Dict[str, Any])
     def auth_login(req: AuthLoginRequest, response: Response):
-        if not configured_admin_key:
-            raise HTTPException(
-                status_code=403,
-                detail="Forbidden: Admin authentication is disabled because AGENTSHIELD_ADMIN_KEY is not configured",
-            )
-        if not hmac.compare_digest(req.admin_key, configured_admin_key):
+        target_tenant = req.tenant_id or "default"
+        matched_role = None
+        matched_user = None
+
+        if configured_admin_key and hmac.compare_digest(req.admin_key, configured_admin_key):
+            matched_role = "global_admin"
+            matched_user = "admin"
+        elif configured_tenant_keys:
+            for t_id, t_key in configured_tenant_keys.items():
+                if hmac.compare_digest(req.admin_key, t_key):
+                    if req.tenant_id and req.tenant_id != t_id:
+                        raise HTTPException(status_code=403, detail=f"Forbidden: Key does not match requested tenant '{req.tenant_id}'")
+                    target_tenant = t_id
+                    matched_role = "tenant_admin"
+                    matched_user = f"admin_{t_id}"
+                    break
+
+        if not matched_role:
+            if not configured_admin_key and not configured_tenant_keys:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Forbidden: Admin authentication is disabled because AGENTSHIELD_ADMIN_KEY is not configured",
+                )
             raise HTTPException(status_code=401, detail="Unauthorized: Invalid administrative credentials")
 
-        token, expires_at = session_manager.create_session("admin")
+        if not session_manager:
+            raise HTTPException(status_code=500, detail="Session manager not initialized")
+
+        token, expires_at = session_manager.create_session(
+            user_id=matched_user,
+            tenant_id=target_tenant,
+            role=matched_role,
+        )
         csrf_token = secrets.token_hex(24)
 
         response.set_cookie(
@@ -500,6 +600,8 @@ def create_app(
             "expires_at": expires_at,
             "csrf_token": csrf_token,
             "read_only": is_read_only,
+            "tenant_id": target_tenant,
+            "role": matched_role,
         }
 
     @app.post("/api/auth/logout")
@@ -513,45 +615,63 @@ def create_app(
 
     @app.get("/api/auth/session", response_model=AuthSessionResponse)
     def auth_session(request: Request):
-        if not configured_admin_key:
-            return AuthSessionResponse(authenticated=False, read_only=is_read_only, admin_configured=False, expires_at=None, csrf_token=None)
-        auth_header = request.headers.get("x-admin-key") or request.headers.get("authorization", "").replace("Bearer ", "").strip()
-        if auth_header and hmac.compare_digest(auth_header, configured_admin_key):
-            return AuthSessionResponse(authenticated=True, read_only=is_read_only, admin_configured=True, expires_at=None, csrf_token=None)
-        token = request.cookies.get("agentshield_session")
-        if token and session_manager:
-            payload = session_manager.verify_token(token)
-            if payload:
-                csrf_token = request.cookies.get("agentshield_csrf")
-                return AuthSessionResponse(
-                    authenticated=True,
-                    read_only=is_read_only,
-                    admin_configured=True,
-                    expires_at=payload.get("exp"),
-                    csrf_token=csrf_token,
-                )
-        return AuthSessionResponse(authenticated=False, read_only=is_read_only, admin_configured=True, expires_at=None, csrf_token=None)
+        try:
+            auth_ctx = _verify_admin(request)
+            csrf_token = request.cookies.get("agentshield_csrf")
+            session_token = request.cookies.get("agentshield_session")
+            exp = None
+            if session_token and session_manager:
+                pl = session_manager.verify_token(session_token)
+                if pl:
+                    exp = pl.get("exp")
+            return AuthSessionResponse(
+                authenticated=True,
+                read_only=is_read_only,
+                admin_configured=True,
+                expires_at=exp,
+                csrf_token=csrf_token,
+                tenant_id=auth_ctx.tenant_id,
+                role=auth_ctx.role,
+            )
+        except HTTPException:
+            return AuthSessionResponse(
+                authenticated=False,
+                read_only=is_read_only,
+                admin_configured=bool(configured_admin_key or configured_tenant_keys),
+                expires_at=None,
+                csrf_token=None,
+                tenant_id="default",
+                role="tenant_admin",
+            )
 
-    # Overview & Statistics Endpoint (public live summary)
+    # Overview & Statistics Endpoint (tenant-isolated live summary)
     @app.get("/api/overview", response_model=OverviewStatsResponse)
     @app.get("/api/stats", response_model=OverviewStatsResponse)
-    def get_overview_stats():
-        records = audit_store.query(limit=500)
+    def get_overview_stats(request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if tenant_id and tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
+        records = audit_store.query(limit=500, tenant_id=effective_tenant)
         allow_count = sum(1 for r in records if r.decision == "ALLOW")
         review_count = sum(1 for r in records if r.decision == "REVIEW")
         block_count = sum(1 for r in records if r.decision == "BLOCK")
-        pending_reviews = shield.get_review_queue()
+        pending_reviews = shield.get_review_queue(tenant_id=effective_tenant)
         active_incidents = 0
         if getattr(shield, "event_manager", None):
-            open_inc = shield.event_manager.store.query_incidents(status="open", limit=100)
+            open_inc = shield.event_manager.store.query_incidents(status="open", limit=100, tenant_id=effective_tenant)
             active_incidents = len(open_inc)
+        paused = sorted(list(shield.get_paused_agents(tenant_id=effective_tenant)))
         return OverviewStatsResponse(
             total_evaluated=len(records),
             allow_count=allow_count,
             review_count=review_count,
             block_count=block_count,
             pending_reviews_count=len(pending_reviews),
-            paused_agents=sorted(list(shield._paused_agents)),
+            paused_agents=paused,
             active_incidents_count=active_incidents,
             is_read_only=is_read_only,
             is_live=True,
@@ -559,6 +679,8 @@ def create_app(
             review=review_count,
             block=block_count,
             total=len(records),
+            tenant_id=effective_tenant,
+            simulated=False,
         )
 
     @app.get("/health", response_model=HealthResponse)
@@ -725,6 +847,13 @@ def create_app(
     def authorize_action(req: AuthorizeRequest, request: Request):
         _check_public_payload_size(request)
         _check_public_rate_limit(request)
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if req.tenant_id and req.tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
         corr_id = (
             req.arguments.get("correlation_id")
             if isinstance(req.arguments, dict) and "correlation_id" in req.arguments
@@ -736,6 +865,7 @@ def create_app(
             arguments=req.arguments,
             permissions=req.permissions,
             correlation_id=corr_id,
+            tenant_id=effective_tenant,
         )
         return DecisionResponse(
             allowed=decision.allowed,
@@ -754,6 +884,13 @@ def create_app(
     def execute_action(req: ExecuteRequest, request: Request):
         _check_public_payload_size(request)
         _check_public_rate_limit(request)
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if req.tenant_id and req.tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
         if req.tool not in ALLOWED_PUBLIC_SANDBOX_TOOLS:
             raise HTTPException(
                 status_code=403,
@@ -770,6 +907,7 @@ def create_app(
             arguments=req.arguments,
             permissions=req.permissions,
             correlation_id=corr_id,
+            tenant_id=effective_tenant,
         )
         dec_resp = DecisionResponse(
             allowed=res.decision.allowed,
@@ -793,18 +931,28 @@ def create_app(
 
     @app.get("/events", response_model=EventsResponse)
     def list_events_public(
+        request: Request,
         decision: Optional[str] = None,
         agent: Optional[str] = None,
         tool: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
     ):
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if tenant_id and tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         records = audit_store.query(
             decision=decision,
             agent=agent,
             tool=tool,
             correlation_id=correlation_id,
             limit=limit,
+            tenant_id=effective_tenant,
         )
         items = [
             EventItem(
@@ -826,6 +974,7 @@ def create_app(
                 record_hash=r.record_hash,
                 correlation_id=r.correlation_id,
                 trace_id=r.trace_id,
+                tenant_id=r.tenant_id,
             )
             for r in records
         ]
@@ -839,15 +988,18 @@ def create_app(
         agent: Optional[str] = None,
         tool: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         records = audit_store.query(
             decision=decision,
             agent=agent,
             tool=tool,
             correlation_id=correlation_id,
             limit=limit,
+            tenant_id=effective_tenant,
         )
         items = [
             EventItem(
@@ -869,6 +1021,7 @@ def create_app(
                 record_hash=r.record_hash,
                 correlation_id=r.correlation_id,
                 trace_id=r.trace_id,
+                tenant_id=r.tenant_id,
             )
             for r in records
         ]
@@ -877,7 +1030,9 @@ def create_app(
     @app.get("/audit/verify", response_model=AuditVerifyResponse)
     @app.get("/api/audit/verify", response_model=AuditVerifyResponse)
     def verify_audit_integrity(request: Request):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        if auth_ctx.role != "global_admin":
+            raise HTTPException(status_code=403, detail="Forbidden: Global platform admin privilege required for audit verification")
         try:
             res = audit_store.verify_integrity()
             return AuditVerifyResponse(
@@ -898,23 +1053,38 @@ def create_app(
     @app.post("/incident/pause")
     @app.post("/api/incident/pause")
     def pause_agent(req: PauseAgentRequest, request: Request):
-        actor = _verify_admin(request)
+        auth_ctx = _verify_admin(request)
         _check_mutation_allowed()
-        shield.pause_agent(req.agent, actor=actor)
-        return {"agent": req.agent, "status": "paused"}
+        effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
+        shield.pause_agent(req.agent, actor=auth_ctx.user_id, tenant_id=effective_tenant)
+        res = {"agent": req.agent, "status": "paused"}
+        if req.tenant_id:
+            res["tenant_id"] = effective_tenant
+        return res
 
     @app.post("/incident/unpause")
     @app.post("/api/incident/unpause")
     def unpause_agent(req: PauseAgentRequest, request: Request):
-        actor = _verify_admin(request)
+        auth_ctx = _verify_admin(request)
         _check_mutation_allowed()
-        shield.unpause_agent(req.agent, actor=actor)
-        return {"agent": req.agent, "status": "active"}
+        effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
+        shield.unpause_agent(req.agent, actor=auth_ctx.user_id, tenant_id=effective_tenant)
+        res = {"agent": req.agent, "status": "active"}
+        if req.tenant_id:
+            res["tenant_id"] = effective_tenant
+        return res
 
     @app.get("/incident/agents")
     @app.get("/api/incident/agents")
-    def list_agents():
-        return {"paused_agents": sorted(list(shield._paused_agents))}
+    def list_agents(request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if tenant_id and tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
+        return {"paused_agents": sorted(list(shield.get_paused_agents(tenant_id=effective_tenant)))}
 
     @app.get("/policies", response_model=PoliciesResponse)
     @app.get("/api/policies", response_model=PoliciesResponse)
@@ -1014,7 +1184,9 @@ def create_app(
     @app.get("/api/config", response_model=RuntimeConfigResponse)
     def get_runtime_configuration(request: Request):
         """Returns non-secret runtime configuration and limits for authorized clients."""
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        if auth_ctx.role != "global_admin":
+            raise HTTPException(status_code=403, detail="Forbidden: Global platform admin privilege required")
         model_name = None
         if getattr(shield, "analyst", None) and getattr(shield.analyst, "provider", None):
             prov = shield.analyst.provider
@@ -1052,9 +1224,10 @@ def create_app(
     @app.get("/api/reviews")
     @app.get("/incident/reviews")
     @app.get("/api/incident/reviews")
-    def list_pending_reviews(request: Request, source: Optional[str] = None):
-        _verify_admin(request)
-        prod_reviews = [dict(r, simulated=False, is_simulated=False) for r in shield.get_review_queue()]
+    def list_pending_reviews(request: Request, source: Optional[str] = None, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
+        prod_reviews = [dict(r, simulated=False, is_simulated=False) for r in shield.get_review_queue(tenant_id=effective_tenant)]
         sim_reviews = [dict(r, simulated=True, is_simulated=True) for r in sim_shield.get_review_queue()]
 
         if source == "production":
@@ -1068,13 +1241,14 @@ def create_app(
     @app.post("/incident/review")
     @app.post("/api/incident/review")
     def review_action(req: ReviewActionRequest, request: Request):
-        actor = _verify_admin(request)
+        auth_ctx = _verify_admin(request)
         _check_mutation_allowed()
+        effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
 
         # Check simulator review queue first
         if sim_shield.review_store.get_review(req.review_id):
             if req.action.lower() == "approve":
-                res = sim_shield.approve_review(req.review_id, approver=actor)
+                res = sim_shield.approve_review(req.review_id, approver=auth_ctx.user_id)
                 if not res:
                     raise HTTPException(status_code=404, detail="Review request not found")
                 return {
@@ -1084,7 +1258,7 @@ def create_app(
                     "simulated": True,
                 }
             else:
-                dec = sim_shield.reject_review(req.review_id, reason=req.reason or "Rejected by reviewer", reviewer=actor)
+                dec = sim_shield.reject_review(req.review_id, reason=req.reason or "Rejected by reviewer", reviewer=auth_ctx.user_id)
                 if not dec:
                     raise HTTPException(status_code=404, detail="Review request not found")
                 return {
@@ -1093,9 +1267,9 @@ def create_app(
                     "simulated": True,
                 }
 
-        # Operational production review queue
+        # Operational production review queue scoped strictly to tenant
         if req.action.lower() == "approve":
-            res = shield.approve_review(req.review_id, approver=actor)
+            res = shield.approve_review(req.review_id, approver=auth_ctx.user_id, tenant_id=effective_tenant)
             if not res:
                 raise HTTPException(status_code=404, detail="Review request not found")
             return {
@@ -1103,15 +1277,17 @@ def create_app(
                 "execution_status": res.execution_status.value,
                 "result": res.tool_result,
                 "simulated": False,
+                "tenant_id": effective_tenant,
             }
         else:
-            dec = shield.reject_review(req.review_id, reason=req.reason or "Rejected by reviewer", reviewer=actor)
+            dec = shield.reject_review(req.review_id, reason=req.reason or "Rejected by reviewer", reviewer=auth_ctx.user_id, tenant_id=effective_tenant)
             if not dec:
                 raise HTTPException(status_code=404, detail="Review request not found")
             return {
                 "status": "rejected",
                 "decision": dec.decision.value,
                 "simulated": False,
+                "tenant_id": effective_tenant,
             }
 
     # Security Event, Alert, and Incident Management Endpoints (authenticated, read-only)
@@ -1126,10 +1302,12 @@ def create_app(
         trace_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
         source: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         target_manager = sim_shield.event_manager if source == "simulation" else getattr(shield, "event_manager", None)
         if not target_manager:
             return SecurityEventsResponse(events=[], total=0)
@@ -1145,16 +1323,18 @@ def create_app(
             correlation_id=correlation_id,
             limit=safe_limit,
             offset=safe_offset,
+            tenant_id=effective_tenant if source != "simulation" else None,
         )
         items = [SecurityEventModel(**e.to_dict()) for e in events]
         return SecurityEventsResponse(events=items, total=len(items))
 
     @app.get("/api/security/events/{event_id}", response_model=SecurityEventModel)
-    def get_security_event(event_id: str, request: Request):
-        _verify_admin(request)
+    def get_security_event(event_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         if not getattr(shield, "event_manager", None):
             raise HTTPException(status_code=404, detail=f"Security event '{event_id}' not found")
-        event = shield.event_manager.get_event(event_id)
+        event = shield.event_manager.get_event(event_id, tenant_id=effective_tenant)
         if not event:
             raise HTTPException(status_code=404, detail=f"Security event '{event_id}' not found")
         return SecurityEventModel(**event.to_dict())
@@ -1170,10 +1350,12 @@ def create_app(
         alert_type: Optional[str] = None,
         correlation_id: Optional[str] = None,
         incident_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         if not getattr(shield, "event_manager", None):
             return SecurityAlertsResponse(alerts=[], total=0)
         safe_limit = max(1, min(limit, 500))
@@ -1187,16 +1369,18 @@ def create_app(
             incident_id=incident_id,
             limit=safe_limit,
             offset=safe_offset,
+            tenant_id=effective_tenant,
         )
         items = [SecurityAlertModel(**a.to_dict()) for a in alerts]
         return SecurityAlertsResponse(alerts=items, total=len(items))
 
     @app.get("/api/security/alerts/{alert_id}", response_model=SecurityAlertModel)
-    def get_security_alert(alert_id: str, request: Request):
-        _verify_admin(request)
+    def get_security_alert(alert_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         if not getattr(shield, "event_manager", None):
             raise HTTPException(status_code=404, detail=f"Security alert '{alert_id}' not found")
-        alert = shield.event_manager.get_alert(alert_id)
+        alert = shield.event_manager.get_alert(alert_id, tenant_id=effective_tenant)
         if not alert:
             raise HTTPException(status_code=404, detail=f"Security alert '{alert_id}' not found")
         return SecurityAlertModel(**alert.to_dict())
@@ -1210,10 +1394,12 @@ def create_app(
         severity: Optional[str] = None,
         agent_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         if not getattr(shield, "event_manager", None):
             return SecurityIncidentsResponse(incidents=[], total=0)
         safe_limit = max(1, min(limit, 500))
@@ -1225,47 +1411,50 @@ def create_app(
             correlation_id=correlation_id,
             limit=safe_limit,
             offset=safe_offset,
+            tenant_id=effective_tenant,
         )
         items = [SecurityIncidentModel(**i.to_dict()) for i in incidents]
         return SecurityIncidentsResponse(incidents=items, total=len(items))
 
     @app.get("/api/security/incidents/{incident_id}", response_model=SecurityIncidentModel)
-    def get_security_incident(incident_id: str, request: Request):
-        _verify_admin(request)
+    def get_security_incident(incident_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         if not re.match(r"^[a-zA-Z0-9_\-\.:]{1,128}$", incident_id):
             raise HTTPException(status_code=400, detail="Invalid incident_id format")
         if not getattr(shield, "event_manager", None):
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
-        incident = shield.event_manager.get_incident(incident_id)
+        incident = shield.event_manager.get_incident(incident_id, tenant_id=effective_tenant)
         if not incident:
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
         return SecurityIncidentModel(**incident.to_dict())
 
     @app.get("/api/security/incidents/{incident_id}/trace", response_model=IncidentTraceResponse)
-    def trace_security_incident(incident_id: str, request: Request):
-        _verify_admin(request)
+    def trace_security_incident(incident_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         if not re.match(r"^[a-zA-Z0-9_\-\.:]{1,128}$", incident_id):
             raise HTTPException(status_code=400, detail="Invalid incident_id format")
         if not getattr(shield, "event_manager", None):
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
-        incident = shield.event_manager.get_incident(incident_id)
+        incident = shield.event_manager.get_incident(incident_id, tenant_id=effective_tenant)
         if not incident:
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
 
         # Correlated alerts
-        alerts = shield.event_manager.query_alerts(incident_id=incident_id, limit=100)
+        alerts = shield.event_manager.query_alerts(incident_id=incident_id, limit=100, tenant_id=effective_tenant)
         if not alerts and incident.correlation_id:
-            alerts = shield.event_manager.query_alerts(correlation_id=incident.correlation_id, limit=100)
+            alerts = shield.event_manager.query_alerts(correlation_id=incident.correlation_id, limit=100, tenant_id=effective_tenant)
 
         # Correlated events
         events = []
         if incident.correlation_id:
-            events = shield.event_manager.query_events(correlation_id=incident.correlation_id, limit=200)
+            events = shield.event_manager.query_events(correlation_id=incident.correlation_id, limit=200, tenant_id=effective_tenant)
 
         # Correlated audit records
         audit_records = []
         if incident.correlation_id:
-            records = audit_store.query(correlation_id=incident.correlation_id, limit=200)
+            records = audit_store.query(correlation_id=incident.correlation_id, limit=200, tenant_id=effective_tenant)
             audit_records = [
                 EventItem(
                     id=r.id or 0,
@@ -1286,6 +1475,7 @@ def create_app(
                     record_hash=r.record_hash,
                     correlation_id=r.correlation_id,
                     trace_id=r.trace_id,
+                    tenant_id=r.tenant_id,
                 )
                 for r in records
             ]
@@ -1315,15 +1505,16 @@ def create_app(
     @app.get("/incident/report/{incident_id}", response_model=AnalysisResponse)
     @app.get("/api/incident/report/{incident_id}", response_model=AnalysisResponse)
     @app.get("/api/security/incidents/{incident_id}/investigation", response_model=AnalysisResponse)
-    def investigate_security_incident(incident_id: str, request: Request):
-        _verify_admin(request)
+    def investigate_security_incident(incident_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         _check_analyst_rate_limit(request)
         if not re.match(r"^[a-zA-Z0-9_\-\.:]{1,128}$", incident_id):
             raise HTTPException(status_code=400, detail="Invalid incident_id format")
         if not security_analyst:
             raise HTTPException(status_code=503, detail="Security Analyst service is not configured")
         active_store = security_analyst.event_store or event_store
-        if not active_store or not active_store.get_incident(incident_id):
+        if not active_store or not active_store.get_incident(incident_id, tenant_id=effective_tenant):
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
 
         try:
@@ -1348,7 +1539,8 @@ def create_app(
     @app.post("/api/incident/report", response_model=AnalysisResponse)
     @app.post("/api/security/analyst/analyze", response_model=AnalysisResponse)
     def analyze_security_incident(req: AnalysisRequest, request: Request):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
         _check_analyst_rate_limit(request)
         if not security_analyst:
             raise HTTPException(status_code=503, detail="Security Analyst service is not configured")
@@ -1358,7 +1550,7 @@ def create_app(
                 if not re.match(r"^[a-zA-Z0-9_\-\.:]{1,128}$", req.incident_id):
                     raise HTTPException(status_code=400, detail="Invalid incident_id format")
                 active_store = security_analyst.event_store or event_store
-                if not active_store or not active_store.get_incident(req.incident_id):
+                if not active_store or not active_store.get_incident(req.incident_id, tenant_id=effective_tenant):
                     raise HTTPException(status_code=404, detail=f"Security incident '{req.incident_id}' not found")
                 report = security_analyst.investigate_incident(req.incident_id)
             elif req.correlation_id:
@@ -1388,16 +1580,18 @@ def create_app(
     def list_incident_reports(
         incident_id: str,
         request: Request,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         active_report_store = getattr(security_analyst, "report_store", None) or report_store
         if not active_report_store:
             raise HTTPException(status_code=503, detail="Investigation Report store is not configured")
 
         active_event_store = getattr(security_analyst, "event_store", None) or event_store
-        if active_event_store and not active_event_store.get_incident(incident_id):
+        if active_event_store and not active_event_store.get_incident(incident_id, tenant_id=effective_tenant):
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
 
         try:
@@ -1413,8 +1607,9 @@ def create_app(
             raise HTTPException(status_code=500, detail=f"Failed to retrieve incident reports: {str(e)}")
 
     @app.get("/api/security/reports/{report_id}", response_model=AnalysisResponse)
-    def get_investigation_report(report_id: str, request: Request):
-        _verify_admin(request)
+    def get_investigation_report(report_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         active_report_store = getattr(security_analyst, "report_store", None) or report_store
         if not active_report_store:
             raise HTTPException(status_code=503, detail="Investigation Report store is not configured")
@@ -1423,6 +1618,10 @@ def create_app(
             report = active_report_store.get_report(report_id)
             if not report:
                 raise HTTPException(status_code=404, detail=f"Investigation report '{report_id}' not found")
+            if auth_ctx.role != "global_admin" and report.incident_id:
+                active_event_store = getattr(security_analyst, "event_store", None) or event_store
+                if active_event_store and not active_event_store.get_incident(report.incident_id, tenant_id=effective_tenant):
+                    raise HTTPException(status_code=404, detail=f"Investigation report '{report_id}' not found")
             return AnalysisResponse(report=report.to_dict())
         except HTTPException:
             raise
@@ -1436,13 +1635,19 @@ def create_app(
         request: Request,
         incident_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         active_report_store = getattr(security_analyst, "report_store", None) or report_store
         if not active_report_store:
             raise HTTPException(status_code=503, detail="Investigation Report store is not configured")
+
+        active_event_store = getattr(security_analyst, "event_store", None) or event_store
+        if incident_id and active_event_store and not active_event_store.get_incident(incident_id, tenant_id=effective_tenant):
+            raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
 
         try:
             reports = active_report_store.query_reports(
@@ -1451,7 +1656,12 @@ def create_app(
                 limit=limit,
                 offset=offset,
             )
-            total_count = active_report_store.count_reports(
+            if auth_ctx.role != "global_admin" and not incident_id and active_event_store:
+                tenant_incidents = active_event_store.query_incidents(tenant_id=effective_tenant, limit=500)
+                allowed_ids = {i.incident_id for i in tenant_incidents}
+                reports = [r for r in reports if r.incident_id in allowed_ids]
+
+            total_count = len(reports) if (auth_ctx.role != "global_admin" and not incident_id) else active_report_store.count_reports(
                 incident_id=incident_id,
                 correlation_id=correlation_id,
             )

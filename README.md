@@ -6,6 +6,10 @@
 
 AgentShield is an open-source, framework-independent Python runtime security SDK and enforcement layer for tool-using AI agents. When an AI agent proposes an action, AgentShield authenticates the agent, validates argument schemas, computes deterministic risk scores, and applies code-defined deterministic security policies (`ALLOW` / `REVIEW` / `BLOCK`). Only permitted actions are executed; every evaluation and execution is recorded to a cryptographically chained audit ledger.
 
+AgentShield operates in two primary modes:
+1. **Standalone Python SDK (`pip install agentshield`)**: A lightweight, zero-network-dependency library embedded directly within Python agent applications. Requires only `pydantic>=2.0`, using an embedded SQLite cryptographic ledger by default.
+2. **Hosted Security Dashboard & API**: An optional FastAPI server and retro 16-bit React dashboard supporting multi-tenant isolation, session-based human-in-the-loop approvals, PostgreSQL persistence, and incident investigation.
+
 ```
 +--------------------+        +-----------------------+        +---------------+
 |     AI Agent       | -----> |      AgentShield      | -----> | External Tool |
@@ -42,6 +46,79 @@ AgentShield includes a retro 16-bit pixel-art security dashboard providing full 
 6. **Destination Allowlisting**: External destinations are allowlisted by parsed hostname, never substring.
 7. **Credential Isolation**: Only the executor holds tool credentials; AI agents never hold or invoke tools directly.
 8. **Cryptographic Ledger**: Cryptographically chained audit records verify ledger integrity and detect tampering.
+
+---
+
+## Supported Platforms, Frameworks & Installation
+
+### Supported Python Versions
+- **Python 3.11, 3.12, 3.13**: Officially supported across all adapters and optional extras.
+- **Python 3.14**: Supported for standalone core SDK, declarative policy, decorator tool protection, and LangChain integration. (CrewAI is constrained to Python < 3.14 due to upstream binary wheel availability).
+
+### Supported Framework Versions
+- **LangChain**: `langchain-core>=0.2.0` (supports LangChain 0.2+)
+- **CrewAI**: `crewai>=0.28.0` (Python 3.11–3.13)
+
+### Installation Matrix
+
+AgentShield enforces a minimal core installation (`pydantic>=2.0` only). All integrations, servers, and cloud providers are isolated behind optional extras:
+
+```bash
+# Standalone Core SDK (Minimal dependencies: pydantic only)
+pip install agentshield
+
+# Declarative YAML Policy Configuration
+pip install "agentshield[yaml]"
+
+# LangChain Integration
+pip install "agentshield[langchain]"
+
+# CrewAI Integration
+pip install "agentshield[crewai]"
+
+# FastAPI Server & Dashboard Backend
+pip install "agentshield[server]"
+
+# Production PostgreSQL Storage Backend
+pip install "agentshield[postgres]"
+
+# Gemini AI Security Analyst Provider
+pip install "agentshield[gemini]"
+
+# Complete Production & Developer Bundle
+pip install "agentshield[all]"
+```
+
+---
+
+## Storage & Database Architecture
+
+AgentShield provides pluggable, ACID-compliant persistent storage for audit logs, human review queues, security events, analyst reports, and simulation telemetry:
+
+### 1. SQLite Storage (Default)
+- **Use Case**: Local development, standalone CLI agents, unit testing, and single-instance applications.
+- **Concurrency & Integrity**: Uses `PRAGMA journal_mode=WAL;` and `BEGIN IMMEDIATE` transactions to prevent dirty reads and ensure atomic, race-free review claims.
+- **Ledger Security**: Implements SHA-256 cryptographic hash-chaining linked to a genesis hash to verify tamper-evidence across restarts.
+- **Configuration**: Automatic zero-config fallback to local files or `:memory:`.
+
+### 2. PostgreSQL Storage (Production & Serverless)
+- **Use Case**: Multi-instance deployments, high-throughput cloud workloads, and Vercel serverless functions.
+- **Concurrency & Locking**: Employs row-level `SELECT ... FOR UPDATE` locking to guarantee atomic at-most-once tool execution across distributed workers.
+- **Schema Management**: Includes automated, advisory-locked schema migrations (`MigrationManager`).
+- **Configuration**: Set `AGENTSHIELD_DATABASE_URL=postgresql://user:pass@host:5432/dbname?sslmode=require` (or `DATABASE_URL`). Fails closed with diagnostic `ConfigurationError` if connection or driver is missing.
+
+---
+
+## Security Guarantees & Operational Boundaries
+
+| Guarantee | Boundary / Requirement |
+| :--- | :--- |
+| **Deterministic Authority** | Policy rules strictly evaluate to `BLOCK` or `ALLOW`. Risk scores can escalate `ALLOW` to `REVIEW` or `BLOCK`, but can never override a policy denial. |
+| **Atomic At-Most-Once Execution** | Competing supervisor approvals for the same review resolve atomically; exactly one worker executes the tool callable. Repeated or replayed approvals fail closed. |
+| **Incident Containment** | Paused agents cannot execute tools under any circumstance—including via supervisor review approval. Approvals for paused agents immediately fail closed. |
+| **Secret Redaction** | Sensitive credentials (passwords, bearer tokens, API keys, private keys) are automatically sanitized across audit stores, review arguments, and event logs. |
+| **Execution Sandboxing** | AgentShield validates parameters and governs authorization deterministically; it does not provide OS-level container isolation (e.g., Docker/gVisor/chroot) for arbitrary hostile bytecode. Tools executing untrusted arbitrary code should run inside isolated sandboxes. |
+| **Operational Boundaries** | Framework callbacks (e.g. LangChain `on_tool_start` or CrewAI agent loggers) run outside AgentShield's execution boundary; callers must ensure sensitive variables are not printed by external hooks. |
 
 ---
 
@@ -192,6 +269,266 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
+## Standalone Python SDK & Declarative Policy
+
+AgentShield can be used as a standalone Python SDK independently of any web server or dashboard:
+
+```bash
+# Core lightweight installation (pydantic only):
+pip install agentshield
+
+# With YAML policy loading support:
+pip install "agentshield[yaml]"
+```
+
+### 1. Declarative Policy via Dictionary
+
+```python
+from agentshield import Shield, PolicyConfiguration
+
+# Define policy declaratively
+policy = PolicyConfiguration.from_dict({
+    "agents": {
+        "support_bot": {
+            "allowed_tools": ["lookup_order", "check_status"],
+            "denied_tools": ["process_refund"],
+            "allowed_destinations": ["api.store.internal"],
+        }
+    },
+    "tools": {
+        "lookup_order": {
+            "max_quantity": "inf",
+            "allowed_destinations": ["api.store.internal"],
+            "argument_schema": {
+                "order_id": "str",
+            },
+        },
+        "process_refund": {
+            "max_amount": 500.0,
+            "required_permissions": ["finance:refund"],
+        },
+    },
+})
+
+shield = Shield(policy=policy)
+
+# Register tool implementation (held exclusively by the executor)
+shield.registry.register("lookup_order", lambda args: {"status": "shipped"})
+
+# Authorize and execute safely
+result = shield.execute(
+    agent="support_bot",
+    tool="lookup_order",
+    arguments={"order_id": "ord_123", "destination": "api.store.internal"},
+)
+print(result.decision.decision.value)  # ALLOW
+print(result.tool_result)             # {'status': 'shipped'}
+```
+
+### 2. Declarative Policy via YAML
+
+```python
+from agentshield import Shield, PolicyConfiguration
+
+# Load policy directly from a YAML file or string (requires agentshield[yaml])
+policy = PolicyConfiguration.from_yaml("policy.yaml")
+shield = Shield(policy=policy)
+```
+
+Example `policy.yaml`:
+
+```yaml
+version: "1"
+agents:
+  support_bot:
+    allowed_tools:
+      - lookup_order
+      - check_status
+    denied_tools:
+      - process_refund
+    allowed_destinations:
+      - api.store.internal
+tools:
+  lookup_order:
+    max_quantity: inf
+    allowed_destinations:
+      - api.store.internal
+    argument_schema:
+      order_id: str
+```
+
+### 3. Decorator-Based Tool Protection (`@shield.protect_tool`)
+
+Protect existing Python functions and methods effortlessly with `@shield.protect_tool`:
+
+```python
+from agentshield import Shield, PolicyConfiguration, ToolBlockedError, ToolReviewRequiredError
+
+shield = Shield(policy=policy)
+
+# Protect synchronous or asynchronous functions
+@shield.protect_tool(agent="support_bot")
+def lookup_order(order_id: str) -> dict:
+    return {"order_id": order_id, "status": "shipped"}
+
+@shield.protect_tool(agent="support_bot", permissions=["finance:refund"])
+def process_refund(order_id: str, amount: float) -> dict:
+    return {"refund_id": "ref_123", "amount": amount}
+
+# 1. ALLOW: Invokes the function exactly once
+result = lookup_order("ord_9901")
+
+# 2. BLOCK: Never invokes the function, raises ToolBlockedError
+try:
+    process_refund("ord_9901", amount=150.0)  # Missing permission or denied
+except ToolBlockedError as err:
+    print(f"Blocked: {err}")
+
+# 3. REVIEW: High-risk actions are enqueued and raise ToolReviewRequiredError
+try:
+    process_refund("ord_9901", amount=5000.0)
+except ToolReviewRequiredError as err:
+    print(f"Human review required: {err.review_id}")
+    # Approved by human supervisor:
+    shield.approve_review(err.review_id, approver="supervisor_1")
+```
+
+### 4. LangChain Integration (`agentshield[langchain]`)
+
+AgentShield provides an adapter for LangChain tools (`BaseTool`, `@tool`, `StructuredTool`).
+
+#### Installation
+```bash
+pip install agentshield[langchain]
+```
+Supported LangChain versions: `langchain-core>=0.2.0` (compatible with LangChain 0.2.x, 0.3.x, and 1.x).
+The core `agentshield` package does not depend on LangChain; all integration imports are lazy.
+
+#### Usage
+```python
+from langchain_core.tools import tool
+from agentshield import Shield, PolicyConfiguration, ToolBlockedError, ToolReviewRequiredError
+
+# Initialize Shield with policy
+shield = Shield(policy=policy)
+
+@tool
+def process_refund(order_id: str, amount: float) -> dict:
+    """Process customer refund."""
+    return {"order_id": order_id, "amount": amount, "status": "refunded"}
+
+# Wrap existing LangChain tool
+safe_refund = shield.protect_langchain_tool(
+    process_refund,
+    agent="support_bot",
+    permissions=["finance:refund"],
+)
+
+# Preserves tool name, description, args_schema, and args:
+print(safe_refund.name)         # 'process_refund'
+print(safe_refund.description)  # 'Process customer refund.'
+print(safe_refund.args_schema)  # Pydantic schema
+
+# 1. ALLOW: Invokes the underlying tool exactly once
+result = safe_refund.invoke({"order_id": "ord_101", "amount": 25.0})
+
+# 2. BLOCK: Policy violations fail closed without invoking underlying tool
+try:
+    safe_refund.invoke({"order_id": "ord_101", "amount": 9000.0})
+except ToolBlockedError as err:
+    print(f"Blocked: {err}")
+
+# 3. REVIEW & Approval Workflow:
+try:
+    safe_refund.invoke({"order_id": "ord_101", "amount": 2500.0})
+except ToolReviewRequiredError as err:
+    print(f"Enqueued for review: {err.review_id}")
+    # The tool was NOT executed. A supervisor approves the review:
+    res = shield.approve_review(err.review_id, approver="lead_auditor")
+    print(res.tool_result)  # Executes tool once with validated frozen arguments
+
+# 4. Async tools:
+# Supported natively via await safe_tool.ainvoke({...})
+```
+
+#### Review Approval Resume Semantics
+When an action is flagged for `REVIEW`, the request arguments are normalized, validated, and frozen into the persistent `ReviewStore`.
+Upon approval via `shield.approve_review(review_id, approver=...)`, AgentShield retrieves the frozen arguments from the store and executes the underlying tool via its registered callable exactly once. Subsequent approval attempts fail closed (at-most-once initiation). For async-only tools approved in synchronous review contexts, AgentShield executes via safe event loop delegation.
+
+### 5. CrewAI Integration (`agentshield[crewai]`)
+
+AgentShield provides a security adapter for CrewAI tools (`crewai.tools.BaseTool` subclasses and custom callables).
+
+#### Installation
+```bash
+pip install "agentshield[crewai]"
+```
+Supported CrewAI versions: `crewai>=0.28.0` (for Python < 3.14). The core `agentshield` package does not depend on CrewAI; all integration imports are lazy.
+
+#### Usage
+```python
+from crewai.tools import BaseTool
+from pydantic import BaseModel, Field
+from agentshield import Shield, PolicyConfiguration, ToolBlockedError, ToolReviewRequiredError
+
+shield = Shield(policy=policy)
+
+class WireTransferInput(BaseModel):
+    to_account: str = Field(description="Recipient account")
+    amount: float = Field(description="Wire amount")
+
+class WireTransferTool(BaseTool):
+    name: str = "wire_transfer"
+    description: str = "Execute an institutional wire transfer."
+    args_schema: type[BaseModel] = WireTransferInput
+
+    def _run(self, to_account: str, amount: float) -> dict:
+        return {"to_account": to_account, "amount": amount, "status": "sent"}
+
+# Wrap CrewAI tool with AgentShield runtime protection
+safe_wire = shield.protect_crewai_tool(
+    WireTransferTool(),
+    agent="financial_agent",
+    permissions=["treasury:wire"],
+)
+
+# Preserves tool metadata and CrewAI BaseTool interface:
+print(safe_wire.name)             # 'wire_transfer'
+print(safe_wire.description)      # 'Execute an institutional wire transfer.'
+print(safe_wire.args_schema)      # WireTransferInput
+print(safe_wire.result_as_answer) # False
+
+# 1. ALLOW: Invokes the underlying tool exactly once
+result = safe_wire.run(to_account="ACC-01", amount=500.0)
+
+# 2. BLOCK: Violations fail closed without invoking underlying tool
+try:
+    safe_wire.run(to_account="ACC-01", amount=25000.0)  # Exceeds max_amount
+except ToolBlockedError as err:
+    print(f"Blocked: {err}")
+
+# 3. REVIEW & Approval Workflow:
+try:
+    safe_wire.run(to_account="ACC-01", amount=5000.0)   # High risk
+except ToolReviewRequiredError as err:
+    print(f"Enqueued for review: {err.review_id}")
+    # Tool was NOT executed prior to approval.
+    approval = shield.approve_review(err.review_id, approver="security_officer")
+    print(approval.tool_result)  # Executes tool once with validated frozen arguments
+
+# 4. Async Execution:
+# Supported natively via await safe_wire.arun(...) / _arun(...)
+```
+
+#### CrewAI Invariants & Security Guarantees
+- **ALLOW**: Underlying tool `run()`, `_run()`, `arun()`, or `_arun()` executes exactly once per authorized invocation.
+- **BLOCK**: Policy violations, unknown tools, unauthorized agents, or destination mismatches fail closed immediately with zero tool invocations.
+- **REVIEW**: Elevated risk triggers human approval queue. The underlying tool never executes prior to approval.
+- **Frozen Arguments & At-Most-Once Approval**: Arguments are validated and frozen at proposal time; approvals execute using those exact frozen values. Repeated approvals fail closed.
+- **Exception Safety**: Internal errors within underlying tools are audited with status `error` or `timeout` and re-raised without retry loops bypassing security checks.
+
+---
+
 ## Vercel Deployment Guide
 
 AgentShield is configured for deployment on Vercel with a Python serverless backend and a Vite React SPA frontend.
@@ -234,4 +571,4 @@ npm --prefix frontend run build
 
 ## License
 
-Apache 2.0. See `LICENSE` for details.
+MIT License. See `LICENSE` for details.

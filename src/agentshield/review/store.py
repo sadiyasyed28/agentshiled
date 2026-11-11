@@ -94,12 +94,18 @@ class ReviewStore(ABC):
         created_at: float,
         expires_at: float,
         idempotency_key: Optional[str] = None,
+        tenant_id: str = "default",
     ) -> None:
         """Enqueues a pending review action."""
         pass
 
     @abstractmethod
-    def get_review(self, review_id: str, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def get_review(
+        self,
+        review_id: str,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Retrieves a review item by review ID."""
         pass
 
@@ -114,7 +120,11 @@ class ReviewStore(ABC):
         pass
 
     @abstractmethod
-    def get_pending_reviews(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+    def get_pending_reviews(
+        self,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Returns all unexpired pending review requests."""
         pass
 
@@ -138,13 +148,19 @@ class ReviewStore(ABC):
         worker_id: Optional[str] = None,
         lease_duration: float = 60.0,
         allow_idempotent_retry: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Atomically claims and approves a review. Returns review data if claimed, None if not claimable."""
         pass
 
     @abstractmethod
     def claim_and_reject(
-        self, review_id: str, reviewer: str, reason: str, now: Optional[float] = None
+        self,
+        review_id: str,
+        reviewer: str,
+        reason: str,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Atomically claims and rejects a pending review. Returns review data if claimed, None if not pending."""
         pass
@@ -250,12 +266,15 @@ class SQLiteReviewStore(ReviewStore):
                     cursor.execute("ALTER TABLE reviews ADD COLUMN execution_worker_id TEXT;")
                 if "lease_expires_at" not in columns:
                     cursor.execute("ALTER TABLE reviews ADD COLUMN lease_expires_at REAL;")
+                if "tenant_id" not in columns:
+                    cursor.execute("ALTER TABLE reviews ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
 
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_expires_at ON reviews(expires_at);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_agent ON reviews(agent);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_exec_status ON reviews(execution_status);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_lease ON reviews(execution_status, lease_expires_at);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_tenant ON reviews(tenant_id, status);")
                 conn.commit()
             except Exception:
                 try:
@@ -307,6 +326,7 @@ class SQLiteReviewStore(ReviewStore):
             "executed_at": float(row["executed_at"]) if "executed_at" in row_keys and row["executed_at"] is not None else None,
             "execution_worker_id": row["execution_worker_id"] if "execution_worker_id" in row_keys else None,
             "lease_expires_at": float(row["lease_expires_at"]) if "lease_expires_at" in row_keys and row["lease_expires_at"] is not None else None,
+            "tenant_id": row["tenant_id"] if "tenant_id" in row_keys else "default",
         }
 
     def enqueue_review(
@@ -320,6 +340,7 @@ class SQLiteReviewStore(ReviewStore):
         created_at: float,
         expires_at: float,
         idempotency_key: Optional[str] = None,
+        tenant_id: str = "default",
     ) -> None:
         # Sanitize actual credentials (api_key, password) while preserving functional arguments (device_token, etc.)
         unfrozen = unfreeze_value(arguments) if (hasattr(arguments, "__dict__") or isinstance(arguments, (dict, list))) else arguments
@@ -346,8 +367,8 @@ class SQLiteReviewStore(ReviewStore):
                     """
                     INSERT INTO reviews (
                         review_id, agent, tool, arguments, permissions, decision,
-                        created_at, expires_at, status, execution_status, idempotency_key
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                        created_at, expires_at, status, execution_status, idempotency_key, tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
                     """,
                     (
                         review_id,
@@ -360,6 +381,7 @@ class SQLiteReviewStore(ReviewStore):
                         expires_at,
                         ReviewExecutionState.NOT_STARTED.value,
                         idempotency_key,
+                        tenant_id,
                     ),
                 )
                 conn.commit()
@@ -451,7 +473,12 @@ class SQLiteReviewStore(ReviewStore):
             finally:
                 self._close_connection(conn)
 
-    def get_review(self, review_id: str, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def get_review(
+        self,
+        review_id: str,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         if now is None:
             now = time.time()
         self.expire_pending(now)
@@ -460,16 +487,28 @@ class SQLiteReviewStore(ReviewStore):
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT review_id, agent, tool, arguments, permissions, decision,
-                           created_at, expires_at, status, approver, reason, execution_status,
-                           error, idempotency_key, executed_at, execution_worker_id, lease_expires_at
-                    FROM reviews
-                    WHERE review_id = ?
-                    """,
-                    (review_id,),
-                )
+                if tenant_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT review_id, agent, tool, arguments, permissions, decision,
+                               created_at, expires_at, status, approver, reason, execution_status,
+                               error, idempotency_key, executed_at, execution_worker_id, lease_expires_at, tenant_id
+                        FROM reviews
+                        WHERE review_id = ? AND tenant_id = ?
+                        """,
+                        (review_id, tenant_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT review_id, agent, tool, arguments, permissions, decision,
+                               created_at, expires_at, status, approver, reason, execution_status,
+                               error, idempotency_key, executed_at, execution_worker_id, lease_expires_at, tenant_id
+                        FROM reviews
+                        WHERE review_id = ?
+                        """,
+                        (review_id,),
+                    )
                 row = cursor.fetchone()
                 return self._row_to_item(row) if row else None
             finally:
@@ -501,7 +540,11 @@ class SQLiteReviewStore(ReviewStore):
             finally:
                 self._close_connection(conn)
 
-    def get_pending_reviews(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+    def get_pending_reviews(
+        self,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         if now is None:
             now = time.time()
         self.expire_pending(now)
@@ -510,16 +553,29 @@ class SQLiteReviewStore(ReviewStore):
             conn = self._get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT review_id, agent, tool, arguments, permissions, decision,
-                           created_at, expires_at, status, approver, reason, execution_status,
-                           error, idempotency_key, executed_at, execution_worker_id, lease_expires_at
-                    FROM reviews
-                    WHERE status = 'pending'
-                    ORDER BY created_at ASC
-                    """
-                )
+                if tenant_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT review_id, agent, tool, arguments, permissions, decision,
+                               created_at, expires_at, status, approver, reason, execution_status,
+                               error, idempotency_key, executed_at, execution_worker_id, lease_expires_at, tenant_id
+                        FROM reviews
+                        WHERE status = 'pending' AND tenant_id = ?
+                        ORDER BY created_at ASC
+                        """,
+                        (tenant_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT review_id, agent, tool, arguments, permissions, decision,
+                               created_at, expires_at, status, approver, reason, execution_status,
+                               error, idempotency_key, executed_at, execution_worker_id, lease_expires_at, tenant_id
+                        FROM reviews
+                        WHERE status = 'pending'
+                        ORDER BY created_at ASC
+                        """
+                    )
                 rows = cursor.fetchall()
                 return [self._row_to_item(r) for r in rows]
             finally:
@@ -533,6 +589,7 @@ class SQLiteReviewStore(ReviewStore):
         worker_id: Optional[str] = None,
         lease_duration: float = 60.0,
         allow_idempotent_retry: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         if now is None:
             now = time.time()
@@ -548,7 +605,7 @@ class SQLiteReviewStore(ReviewStore):
                     """
                     SELECT review_id, agent, tool, arguments, permissions, decision,
                            created_at, expires_at, status, approver, reason, execution_status,
-                           error, idempotency_key, executed_at, execution_worker_id, lease_expires_at
+                           error, idempotency_key, executed_at, execution_worker_id, lease_expires_at, tenant_id
                     FROM reviews
                     WHERE review_id = ?
                     """,
@@ -558,6 +615,13 @@ class SQLiteReviewStore(ReviewStore):
                 if not row:
                     conn.commit()
                     return None
+
+                # Tenant boundary enforcement: prevent cross-tenant approval (IDOR)
+                if tenant_id is not None:
+                    row_tenant = row["tenant_id"] if "tenant_id" in row.keys() else "default"
+                    if row_tenant != tenant_id:
+                        conn.commit()
+                        return None
 
                 status = row["status"]
                 exec_state = row["execution_status"]
@@ -633,7 +697,12 @@ class SQLiteReviewStore(ReviewStore):
                 self._close_connection(conn)
 
     def claim_and_reject(
-        self, review_id: str, reviewer: str, reason: str, now: Optional[float] = None
+        self,
+        review_id: str,
+        reviewer: str,
+        reason: str,
+        now: Optional[float] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         if now is None:
             now = time.time()
@@ -647,7 +716,7 @@ class SQLiteReviewStore(ReviewStore):
                     """
                     SELECT review_id, agent, tool, arguments, permissions, decision,
                            created_at, expires_at, status, approver, reason, execution_status,
-                           error, idempotency_key, executed_at, execution_worker_id, lease_expires_at
+                           error, idempotency_key, executed_at, execution_worker_id, lease_expires_at, tenant_id
                     FROM reviews
                     WHERE review_id = ?
                     """,
@@ -657,6 +726,13 @@ class SQLiteReviewStore(ReviewStore):
                 if not row:
                     conn.commit()
                     return None
+
+                # Tenant boundary enforcement: prevent cross-tenant rejection
+                if tenant_id is not None:
+                    row_tenant = row["tenant_id"] if "tenant_id" in row.keys() else "default"
+                    if row_tenant != tenant_id:
+                        conn.commit()
+                        return None
 
                 if row["status"] != "pending":
                     conn.commit()

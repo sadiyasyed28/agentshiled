@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import hmac
 import inspect
@@ -5,7 +6,7 @@ import os
 import secrets
 import threading
 import time
-from typing import Any, Optional, Dict, List, Set, Tuple
+from typing import Any, Optional, Dict, List, Set, Tuple, Callable, Union
 import uuid
 from agentshield.models import (
     Action,
@@ -55,6 +56,30 @@ class ExecutionResult:
         self.execution_status = execution_status
         self.tool_result = tool_result
         self.error = error
+
+
+class ToolBlockedError(PermissionError):
+    """Raised when an invocation of a protected tool is blocked by policy or risk evaluation."""
+    def __init__(self, message: str, decision: Decision, tool_name: str, agent: str):
+        super().__init__(message)
+        self.decision = decision
+        self.tool_name = tool_name
+        self.agent = agent
+        self.reasons = list(decision.reasons)
+        self.risk_score = decision.risk_score
+
+
+class ToolReviewRequiredError(PermissionError):
+    """Raised when an invocation of a protected tool requires human approval before execution."""
+    def __init__(self, message: str, decision: Decision, tool_name: str, agent: str, review_id: Optional[str] = None):
+        super().__init__(message)
+        self.decision = decision
+        self.tool_name = tool_name
+        self.agent = agent
+        self.reasons = list(decision.reasons)
+        self.risk_score = decision.risk_score
+        self.review_id = review_id or getattr(decision, "review_id", None)
+
 
 class _ReviewQueueProxy:
     """Proxy mapping that exposes pending reviews from the persistent review store as a dict-like interface."""
@@ -174,6 +199,8 @@ class Shield:
         max_tool_execution_seconds: Optional[float] = None,
         logger: Optional[Any] = None,
         metrics_collector: Optional[Any] = None,
+        policy: Optional[Any] = None,
+        policy_config: Optional[Any] = None,
     ):
         self.registry = ToolRegistry()
         self.analyst = analyst
@@ -195,19 +222,30 @@ class Shield:
             cycle_limit=self.reliability_config.loop_cycle_limit,
         )
         self.budget_tracker = budget_tracker or SessionBudgetTracker()
-        config = PolicyConfiguration(
-            agents={
-                "shopping_agent": AgentConfig(
-                    name="shopping_agent",
-                    allowed_tools=["search_product", "get_product", "create_order"],
-                    denied_tools=["refund_order"]
+        effective_policy = policy if policy is not None else policy_config
+        if effective_policy is not None:
+            if isinstance(effective_policy, PolicyConfiguration):
+                config = effective_policy
+            elif isinstance(effective_policy, dict):
+                config = PolicyConfiguration.from_dict(effective_policy)
+            else:
+                raise TypeError(
+                    f"policy must be a PolicyConfiguration or dict, got {type(effective_policy).__name__}"
                 )
-            },
-            tools={
-                "create_order": ToolRule(tool="create_order", max_quantity=10),
-                "refund_order": ToolRule(tool="refund_order", max_amount=10000, required_permissions=["refund"])
-            }
-        )
+        else:
+            config = PolicyConfiguration(
+                agents={
+                    "shopping_agent": AgentConfig(
+                        name="shopping_agent",
+                        allowed_tools=["search_product", "get_product", "create_order"],
+                        denied_tools=["refund_order"]
+                    )
+                },
+                tools={
+                    "create_order": ToolRule(tool="create_order", max_quantity=10),
+                    "refund_order": ToolRule(tool="refund_order", max_amount=10000, required_permissions=["refund"])
+                }
+            )
         self.policy_engine = PolicyEngine(config)
         self.risk_engine = risk_engine or RiskEngine()
         self.audit_store = audit_store
@@ -262,6 +300,7 @@ class Shield:
 
         # Paused agents set (incident response kill-switch)
         self._paused_agents: Set[str] = set()
+        self._tenant_paused_agents: Dict[str, Set[str]] = {}
 
         # Observability & Monitoring
         from agentshield.observability import get_operational_logger, get_metrics_collector
@@ -300,6 +339,430 @@ class Shield:
         self._agent_salts[agent] = new_salt
         self.agent_keys[agent] = new_hash
 
+    def load_policy(
+        self,
+        policy: Any
+    ) -> PolicyConfiguration:
+        """Loads a declarative policy configuration into the shield's policy engine.
+
+        Args:
+            policy: A PolicyConfiguration instance, a dictionary, or a YAML string/Path.
+
+        Returns:
+            The loaded PolicyConfiguration instance.
+        """
+        from pathlib import Path
+        if isinstance(policy, PolicyConfiguration):
+            loaded_config = policy
+        elif isinstance(policy, dict):
+            loaded_config = PolicyConfiguration.from_dict(policy)
+        elif isinstance(policy, (str, Path)):
+            loaded_config = PolicyConfiguration.from_yaml(policy)
+        else:
+            raise TypeError(f"Unsupported policy type: {type(policy).__name__}")
+
+        self.policy_engine = PolicyEngine(loaded_config)
+        return loaded_config
+
+    def set_policy(self, policy: PolicyConfiguration) -> None:
+        """Sets the active PolicyConfiguration on the policy engine."""
+        if not isinstance(policy, PolicyConfiguration):
+            raise TypeError(f"policy must be a PolicyConfiguration instance, got {type(policy).__name__}")
+        self.policy_engine = PolicyEngine(policy)
+
+    def protect_tool(
+        self,
+        func: Optional[Callable[..., Any]] = None,
+        *,
+        name: Optional[str] = None,
+        agent: Optional[str] = None,
+        permissions: Optional[List[str]] = None,
+        read_only: bool = False,
+        idempotent: bool = False,
+        guarantees_deduplication: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        raise_on_blocked: bool = True,
+    ) -> Callable[..., Any]:
+        """Decorator that wraps a tool callable with deterministic AgentShield policy enforcement.
+
+        Invariants:
+        - ALLOW: Invokes the original callable exactly once and records audit telemetry.
+        - BLOCK: Never invokes the original callable; audits failure and raises ToolBlockedError
+                 (or returns an ExecutionResult if raise_on_blocked=False).
+        - REVIEW: Never invokes the original callable before human approval; enqueues review and
+                  raises ToolReviewRequiredError (or returns an ExecutionResult).
+        - Preserves the wrapped function's signature, docstring, and metadata via functools.wraps.
+        - Supports both synchronous and asynchronous functions.
+
+        Args:
+            func: The function to decorate (when used as bare @shield.protect_tool).
+            name: Explicit tool name (defaults to func.__name__).
+            agent: Default agent identity for invocations of this tool.
+            permissions: Required or granted permissions for this tool.
+            read_only: Whether the tool performs read-only operations.
+            idempotent: Whether the tool is idempotent.
+            guarantees_deduplication: Whether the tool guarantees downstream deduplication on retries.
+            metadata: Additional metadata dictionary to attach to the registered tool.
+            raise_on_blocked: If True (default), raises ToolBlockedError/ToolReviewRequiredError on rejection.
+                              If False, returns ExecutionResult.
+
+        Returns:
+            Wrapped callable.
+        """
+        def _decorator(target_func: Callable[..., Any]) -> Callable[..., Any]:
+            tool_name = name or target_func.__name__
+
+            # Register with shield's tool registry so policy engine and reviews recognize it
+            self.registry.register(
+                name=tool_name,
+                callable_func=target_func,
+                metadata=metadata,
+                required_permissions=permissions,
+                idempotent=idempotent,
+                guarantees_deduplication=guarantees_deduplication,
+                read_only=read_only,
+            )
+
+            sig = inspect.signature(target_func)
+            param_names = set(sig.parameters.keys())
+            is_async = inspect.iscoroutinefunction(target_func)
+
+            def _prepare_call(call_args: tuple, call_kwargs: dict):
+                clean_kwargs = dict(call_kwargs)
+
+                # Extract security context arguments if passed by caller
+                caller_agent = clean_kwargs.pop("_agent", None)
+                if caller_agent is None and "agent_id" in clean_kwargs and "agent_id" not in param_names:
+                    caller_agent = clean_kwargs.pop("agent_id")
+                effective_agent = caller_agent if caller_agent is not None else (agent or "")
+
+                caller_perms = clean_kwargs.pop("_permissions", None)
+                if caller_perms is None and "permissions" in clean_kwargs and "permissions" not in param_names:
+                    caller_perms = clean_kwargs.pop("permissions")
+                effective_perms = caller_perms if caller_perms is not None else (permissions or [])
+
+                caller_key = clean_kwargs.pop("_agent_key", None)
+                caller_corr = clean_kwargs.pop("_correlation_id", None)
+                caller_trace = clean_kwargs.pop("_trace_id", None)
+
+                # Bind arguments for policy evaluation
+                try:
+                    bound = sig.bind_partial(*call_args, **clean_kwargs)
+                    bound.apply_defaults()
+                    eval_args = dict(bound.arguments)
+                except TypeError:
+                    eval_args = dict(clean_kwargs)
+                    for idx, a in enumerate(call_args):
+                        eval_args[f"arg_{idx}"] = a
+
+                # Authorize
+                decision = self.authorize(
+                    agent=effective_agent,
+                    tool=tool_name,
+                    arguments=eval_args,
+                    permissions=effective_perms,
+                    agent_key=caller_key,
+                    correlation_id=caller_corr,
+                    trace_id=caller_trace,
+                )
+
+                return effective_agent, clean_kwargs, decision
+
+            def _handle_non_allow(decision: Decision, effective_agent: str) -> Optional[ExecutionResult]:
+                policy_hash = self.policy_engine.version_hash
+                if self.audit_store:
+                    try:
+                        self.audit_store.log_decision(
+                            decision,
+                            decision.arguments,
+                            execution_status="not_executed",
+                            policy_version_hash=policy_hash,
+                        )
+                    except Exception:
+                        pass
+                self._publish_security_event(
+                    agent_id=decision.agent,
+                    tool=decision.tool,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.LOW.value if decision.decision == DecisionValue.REVIEW else EventSeverity.MEDIUM.value,
+                    decision=decision.decision.value,
+                    risk_score=decision.risk_score,
+                    evidence=decision.reasons,
+                    trace_id=decision.trace_id,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "not_executed", "arguments": decision.arguments},
+                )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("not_executed", duration_ms=0.0)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=decision.agent,
+                        tool=decision.tool,
+                        status="not_executed",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=0.0,
+                        arguments=decision.arguments,
+                    )
+
+                if decision.decision == DecisionValue.REVIEW:
+                    rev_id = getattr(decision, "review_id", None)
+                    if raise_on_blocked:
+                        raise ToolReviewRequiredError(
+                            f"Tool '{tool_name}' for agent '{effective_agent}' requires human review"
+                            f"{f' (review_id: {rev_id})' if rev_id else ''}",
+                            decision=decision,
+                            tool_name=tool_name,
+                            agent=effective_agent,
+                            review_id=rev_id,
+                        )
+                    return ExecutionResult(
+                        decision=decision,
+                        execution_status=ExecutionStatus.NOT_EXECUTED,
+                        tool_result=None,
+                    )
+
+                # BLOCK
+                if raise_on_blocked:
+                    reasons_str = "; ".join(decision.reasons) if decision.reasons else "Blocked by policy"
+                    raise ToolBlockedError(
+                        f"Tool '{tool_name}' blocked for agent '{effective_agent}': {reasons_str}",
+                        decision=decision,
+                        tool_name=tool_name,
+                        agent=effective_agent,
+                    )
+                return ExecutionResult(
+                    decision=decision,
+                    execution_status=ExecutionStatus.NOT_EXECUTED,
+                    tool_result=None,
+                )
+
+            def _audit_and_log_success(decision: Decision, effective_agent: str, duration_ms: float) -> None:
+                policy_hash = self.policy_engine.version_hash
+                if self.audit_store:
+                    self.audit_store.log_decision(
+                        decision,
+                        decision.arguments,
+                        execution_status="executed",
+                        policy_version_hash=policy_hash,
+                    )
+                self._publish_security_event(
+                    agent_id=effective_agent,
+                    tool=tool_name,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.LOW.value,
+                    decision="ALLOW",
+                    risk_score=decision.risk_score,
+                    evidence=["Tool executed successfully via decorator"],
+                    trace_id=decision.trace_id,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "executed", "arguments": decision.arguments},
+                )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("executed", duration_ms=duration_ms)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=effective_agent,
+                        tool=tool_name,
+                        status="executed",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=duration_ms,
+                        arguments=decision.arguments,
+                    )
+
+            def _audit_and_log_error(decision: Decision, effective_agent: str, error_msg: str, duration_ms: float) -> None:
+                policy_hash = self.policy_engine.version_hash
+                if self.audit_store:
+                    self.audit_store.log_decision(
+                        decision,
+                        decision.arguments,
+                        execution_status="error",
+                        error=error_msg,
+                        policy_version_hash=policy_hash,
+                    )
+                self._publish_security_event(
+                    agent_id=effective_agent,
+                    tool=tool_name,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.MEDIUM.value,
+                    decision="ALLOW",
+                    risk_score=decision.risk_score,
+                    evidence=[f"Tool error: {error_msg}"],
+                    trace_id=decision.trace_id,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "error", "error": error_msg, "arguments": decision.arguments},
+                )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("error", duration_ms=duration_ms)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=effective_agent,
+                        tool=tool_name,
+                        status="error",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=duration_ms,
+                        error=error_msg,
+                        arguments=decision.arguments,
+                    )
+
+            if is_async:
+                @functools.wraps(target_func)
+                async def async_wrapper(*call_args: Any, **call_kwargs: Any) -> Any:
+                    effective_agent, clean_kwargs, decision = _prepare_call(call_args, call_kwargs)
+                    if decision.decision != DecisionValue.ALLOW or not decision.allowed:
+                        return _handle_non_allow(decision, effective_agent)
+
+                    frozen_args = decision.arguments
+                    exec_args = unfreeze_value(frozen_args) if frozen_args is not None else dict(clean_kwargs)
+                    try:
+                        bound_exec = sig.bind_partial(**exec_args)
+                        bound_exec.apply_defaults()
+                        exec_call_args = bound_exec.args
+                        exec_call_kwargs = bound_exec.kwargs
+                    except (TypeError, ValueError):
+                        exec_call_args = call_args
+                        exec_call_kwargs = clean_kwargs
+
+                    start_exec = time.perf_counter()
+                    try:
+                        res = await target_func(*exec_call_args, **exec_call_kwargs)
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_success(decision, effective_agent, duration_ms)
+                        if not raise_on_blocked:
+                            return ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
+                        return res
+                    except Exception as exc:
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_error(decision, effective_agent, str(exc), duration_ms)
+                        raise
+
+                async_wrapper.__shield_tool__ = tool_name
+                async_wrapper.__shield__ = self
+                async_wrapper.__signature__ = sig
+                try:
+                    del async_wrapper.__wrapped__
+                except (AttributeError, KeyError):
+                    pass
+                return async_wrapper
+
+            else:
+                @functools.wraps(target_func)
+                def sync_wrapper(*call_args: Any, **call_kwargs: Any) -> Any:
+                    effective_agent, clean_kwargs, decision = _prepare_call(call_args, call_kwargs)
+                    if decision.decision != DecisionValue.ALLOW or not decision.allowed:
+                        return _handle_non_allow(decision, effective_agent)
+
+                    frozen_args = decision.arguments
+                    exec_args = unfreeze_value(frozen_args) if frozen_args is not None else dict(clean_kwargs)
+                    try:
+                        bound_exec = sig.bind_partial(**exec_args)
+                        bound_exec.apply_defaults()
+                        exec_call_args = bound_exec.args
+                        exec_call_kwargs = bound_exec.kwargs
+                    except (TypeError, ValueError):
+                        exec_call_args = call_args
+                        exec_call_kwargs = clean_kwargs
+
+                    start_exec = time.perf_counter()
+                    try:
+                        res = target_func(*exec_call_args, **exec_call_kwargs)
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_success(decision, effective_agent, duration_ms)
+                        if not raise_on_blocked:
+                            return ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
+                        return res
+                    except Exception as exc:
+                        duration_ms = (time.perf_counter() - start_exec) * 1000.0
+                        _audit_and_log_error(decision, effective_agent, str(exc), duration_ms)
+                        raise
+
+                sync_wrapper.__shield_tool__ = tool_name
+                sync_wrapper.__shield__ = self
+                sync_wrapper.__signature__ = sig
+                try:
+                    del sync_wrapper.__wrapped__
+                except (AttributeError, KeyError):
+                    pass
+                return sync_wrapper
+
+        if func is not None:
+            return _decorator(func)
+        return _decorator
+
+    tool = protect_tool
+
+    def protect_langchain_tool(
+        self,
+        tool: Any,
+        agent: Optional[str] = None,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        permissions: Optional[List[str]] = None,
+        correlation_id: Optional[str] = None,
+        raise_on_blocked: bool = True,
+        read_only: bool = False,
+        idempotent: bool = False,
+        guarantees_deduplication: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Wraps a LangChain BaseTool with AgentShield runtime security policy enforcement.
+
+        Requires 'langchain-core' (install via `pip install agentshield[langchain]`).
+        """
+        from agentshield.integrations.langchain import protect_langchain_tool
+        return protect_langchain_tool(
+            tool=tool,
+            shield=self,
+            agent=agent,
+            name=name,
+            description=description,
+            permissions=permissions,
+            correlation_id=correlation_id,
+            raise_on_blocked=raise_on_blocked,
+            read_only=read_only,
+            idempotent=idempotent,
+            guarantees_deduplication=guarantees_deduplication,
+            metadata=metadata,
+        )
+
+    def protect_crewai_tool(
+        self,
+        tool: Any,
+        agent: Optional[str] = None,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        permissions: Optional[List[str]] = None,
+        correlation_id: Optional[str] = None,
+        raise_on_blocked: bool = True,
+        read_only: bool = False,
+        idempotent: bool = False,
+        guarantees_deduplication: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Wraps a CrewAI BaseTool with AgentShield runtime security policy enforcement.
+
+        Requires 'crewai' (install via `pip install agentshield[crewai]`).
+        """
+        from agentshield.integrations.crewai import protect_crewai_tool
+        return protect_crewai_tool(
+            tool=tool,
+            shield=self,
+            agent=agent,
+            name=name,
+            description=description,
+            permissions=permissions,
+            correlation_id=correlation_id,
+            raise_on_blocked=raise_on_blocked,
+            read_only=read_only,
+            idempotent=idempotent,
+            guarantees_deduplication=guarantees_deduplication,
+            metadata=metadata,
+        )
+
     def _audit_action(
         self,
         action_name: str,
@@ -308,11 +771,13 @@ class Shield:
         decision_val: DecisionValue,
         reasons: List[str],
         details: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
         if not self.audit_store:
             return
         trace_id = details.get("trace_id") if details else None
         correlation_id = details.get("correlation_id") if details else None
+        effective_tenant = tenant_id or (details.get("tenant_id") if details else None) or "default"
         dec = Decision(
             allowed=(decision_val == DecisionValue.ALLOW),
             decision=decision_val,
@@ -331,7 +796,8 @@ class Shield:
             decision=dec,
             arguments=args,
             execution_status="executed" if decision_val == DecisionValue.ALLOW else "not_executed",
-            policy_version_hash=self.policy_engine.version_hash
+            policy_version_hash=self.policy_engine.version_hash,
+            tenant_id=effective_tenant,
         )
         self._publish_security_event(
             agent_id=agent,
@@ -343,6 +809,7 @@ class Shield:
             trace_id=trace_id,
             correlation_id=correlation_id,
             metadata=args,
+            tenant_id=effective_tenant,
         )
 
     def _publish_security_event(
@@ -357,6 +824,7 @@ class Shield:
         trace_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SecurityEvent]:
         if not getattr(self, "event_manager", None):
             return None
@@ -372,35 +840,58 @@ class Shield:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 metadata=metadata or {},
+                tenant_id=tenant_id or "default",
             )
         except Exception:
             return None
 
-    def pause_agent(self, agent: str, actor: str = "system") -> None:
+    def pause_agent(self, agent: str, actor: str = "system", tenant_id: Optional[str] = None) -> None:
         """Pauses an agent immediately; all actions fail closed to BLOCK."""
-        self._paused_agents.add(agent)
+        if tenant_id and tenant_id != "global":
+            self._tenant_paused_agents.setdefault(tenant_id, set()).add(agent)
+        else:
+            self._paused_agents.add(agent)
         self._audit_action(
             action_name="pause",
             agent=agent,
             actor=actor,
             decision_val=DecisionValue.BLOCK,
-            reasons=[f"Agent '{agent}' paused by {actor}"]
+            reasons=[f"Agent '{agent}' paused by {actor}"],
+            details={"tenant_id": tenant_id} if tenant_id else None,
+            tenant_id=tenant_id,
         )
 
-    def unpause_agent(self, agent: str, actor: str = "system") -> None:
+    def unpause_agent(self, agent: str, actor: str = "system", tenant_id: Optional[str] = None) -> None:
         """Unpauses an agent."""
-        self._paused_agents.discard(agent)
+        if tenant_id and tenant_id != "global":
+            if tenant_id in self._tenant_paused_agents:
+                self._tenant_paused_agents[tenant_id].discard(agent)
+        else:
+            self._paused_agents.discard(agent)
         self._audit_action(
             action_name="unpause",
             agent=agent,
             actor=actor,
             decision_val=DecisionValue.ALLOW,
-            reasons=[f"Agent '{agent}' unpaused by {actor}"]
+            reasons=[f"Agent '{agent}' unpaused by {actor}"],
+            details={"tenant_id": tenant_id} if tenant_id else None,
+            tenant_id=tenant_id,
         )
 
-    def is_agent_paused(self, agent: str) -> bool:
-        """Returns True if the agent is currently paused."""
-        return agent in self._paused_agents
+    def is_agent_paused(self, agent: str, tenant_id: Optional[str] = None) -> bool:
+        """Returns True if the agent is currently paused globally or within the tenant."""
+        if agent in self._paused_agents:
+            return True
+        if tenant_id and agent in self._tenant_paused_agents.get(tenant_id, set()):
+            return True
+        return False
+
+    def get_paused_agents(self, tenant_id: Optional[str] = None) -> Set[str]:
+        """Returns the set of paused agents visible to this tenant context."""
+        paused = set(self._paused_agents)
+        if tenant_id and tenant_id in self._tenant_paused_agents:
+            paused |= self._tenant_paused_agents[tenant_id]
+        return paused
 
     def _cleanup_expired_reviews(self) -> None:
         now = time.time()
@@ -418,7 +909,9 @@ class Shield:
                     "status": ReviewStatus.EXPIRED.value,
                     "trace_id": getattr(orig_dec, "trace_id", None) if orig_dec else None,
                     "correlation_id": getattr(orig_dec, "correlation_id", None) if orig_dec else None,
-                }
+                    "tenant_id": item.get("tenant_id") or "default",
+                },
+                tenant_id=item.get("tenant_id") or "default",
             )
 
     def get_review_status(self, review_id: str) -> Optional[str]:
@@ -430,19 +923,23 @@ class Shield:
         """Returns the explicit execution state ('not_started', 'executing', 'succeeded', 'failed', 'outcome_unknown')."""
         return self.review_store.get_execution_state(review_id)
 
-    def get_review_queue(self) -> List[Dict[str, Any]]:
+    def get_review_queue(self, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Returns the pending unexpired review actions."""
         self._cleanup_expired_reviews()
-        return self.review_store.get_pending_reviews()
+        return self.review_store.get_pending_reviews(tenant_id=tenant_id)
 
     def approve_review(
-        self, review_id: str, approver: str = "human_reviewer", allow_idempotent_retry: bool = False
+        self,
+        review_id: str,
+        approver: str = "human_reviewer",
+        allow_idempotent_retry: bool = False,
+        tenant_id: Optional[str] = None,
     ) -> Optional[ExecutionResult]:
         """Approves and executes an action from the review queue.
         Enforces at-most-once initiation for non-idempotent actions and deduplicated idempotent execution."""
         self._cleanup_expired_reviews()
 
-        item_check = self.review_store.get_review(review_id)
+        item_check = self.review_store.get_review(review_id, tenant_id=tenant_id)
         if not item_check:
             return None
 
@@ -458,6 +955,7 @@ class Shield:
 
         worker_id = f"proc_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         lease_sec = self.lease_duration
+        effective_tenant = tenant_id or item_check.get("tenant_id") or "default"
         # Atomically claim and mark executing with worker ownership and lease
         item = self.review_store.claim_and_approve(
             review_id,
@@ -466,9 +964,87 @@ class Shield:
             worker_id=worker_id,
             lease_duration=lease_sec,
             allow_idempotent_retry=can_idempotent_retry,
+            tenant_id=tenant_id,
         )
         if not item:
             return None
+
+        # Security invariant: verify agent is not paused
+        if self.is_agent_paused(item["agent"], tenant_id=effective_tenant):
+            err_msg = f"Agent '{item['agent']}' is currently paused; execution blocked by containment policy"
+            self.review_store.mark_executed(
+                review_id=review_id,
+                execution_state=ReviewExecutionState.FAILED.value,
+                error=err_msg,
+                worker_id=worker_id,
+            )
+            self._audit_action(
+                action_name="reject",
+                agent=item["agent"],
+                actor="system:containment",
+                decision_val=DecisionValue.BLOCK,
+                reasons=[err_msg],
+                details={
+                    "review_id": review_id,
+                    "tool": item["tool"],
+                    "status": "blocked_paused_agent",
+                }
+            )
+            return ExecutionResult(
+                decision=Decision(
+                    allowed=False,
+                    decision=DecisionValue.BLOCK,
+                    reasons=[err_msg],
+                    risk_score=95.0,
+                    severity=RiskLevel.HIGH,
+                    agent=item["agent"],
+                    tool=item["tool"],
+                    arguments=item["arguments"],
+                ),
+                execution_status=ExecutionStatus.NOT_EXECUTED,
+                tool_result=None,
+                error=err_msg,
+            )
+
+        # Security invariant: re-validate deterministic policy at execution time
+        action = Action(agent=item["agent"], tool=item["tool"], arguments=item["arguments"] or {})
+        policy_results = self.policy_engine.evaluate(action, permissions=item.get("permissions") or [])
+        failed_rules = [pr for pr in policy_results if not pr.passed]
+        if failed_rules:
+            err_msg = f"Execution blocked by deterministic policy: {'; '.join(pr.reason for pr in failed_rules)}"
+            self.review_store.mark_executed(
+                review_id=review_id,
+                execution_state=ReviewExecutionState.FAILED.value,
+                error=err_msg,
+                worker_id=worker_id,
+            )
+            self._audit_action(
+                action_name="reject",
+                agent=item["agent"],
+                actor="system:policy_enforcer",
+                decision_val=DecisionValue.BLOCK,
+                reasons=[err_msg],
+                details={
+                    "review_id": review_id,
+                    "tool": item["tool"],
+                    "status": "blocked_policy_violation",
+                }
+            )
+            return ExecutionResult(
+                decision=Decision(
+                    allowed=False,
+                    decision=DecisionValue.BLOCK,
+                    reasons=[err_msg],
+                    risk_score=95.0,
+                    severity=RiskLevel.HIGH,
+                    agent=item["agent"],
+                    tool=item["tool"],
+                    arguments=item["arguments"],
+                ),
+                execution_status=ExecutionStatus.NOT_EXECUTED,
+                tool_result=None,
+                error=err_msg,
+            )
 
         # Audit approve action
         orig_dec = item.get("decision")
@@ -530,6 +1106,7 @@ class Shield:
                 item["tool"],
                 item["arguments"],
                 idempotency_key=item.get("idempotency_key"),
+                tenant_id=effective_tenant,
             )
             exec_state = (
                 ReviewExecutionState.SUCCEEDED.value
@@ -564,14 +1141,21 @@ class Shield:
             if hb_thread and hb_thread.is_alive():
                 hb_thread.join(timeout=1.0)
 
-    def reject_review(self, review_id: str, reason: str = "Rejected by reviewer", reviewer: str = "human_reviewer") -> Optional[Decision]:
+    def reject_review(
+        self,
+        review_id: str,
+        reason: str = "Rejected by reviewer",
+        reviewer: str = "human_reviewer",
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Decision]:
         """Rejects a pending action in the review queue."""
         self._cleanup_expired_reviews()
-        item = self.review_store.claim_and_reject(review_id, reviewer=reviewer, reason=reason, now=time.time())
+        item = self.review_store.claim_and_reject(review_id, reviewer=reviewer, reason=reason, now=time.time(), tenant_id=tenant_id)
         if not item:
             return None
 
         orig_dec = item.get("decision")
+        effective_tenant = tenant_id or item.get("tenant_id") or "default"
         # Audit reject action
         self._audit_action(
             action_name="reject",
@@ -587,7 +1171,9 @@ class Shield:
                 "status": ReviewStatus.REJECTED.value,
                 "trace_id": getattr(orig_dec, "trace_id", None) if orig_dec else None,
                 "correlation_id": getattr(orig_dec, "correlation_id", None) if orig_dec else None,
-            }
+                "tenant_id": effective_tenant,
+            },
+            tenant_id=effective_tenant,
         )
         return Decision(
             allowed=False,
@@ -724,8 +1310,10 @@ class Shield:
         agent_key: Optional[str] = None,
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
     ) -> Decision:
         start_time = time.perf_counter()
+        effective_tenant = tenant_id or "default"
         from agentshield.observability.correlation import sanitize_correlation_id, generate_trace_id, get_current_correlation_id
         if arguments is None:
             arguments = {}
@@ -773,6 +1361,7 @@ class Shield:
                     trace_id=trace_id,
                     correlation_id=correlation_id,
                     metadata={"error": "payload_size_limit_exceeded", "limit": self.reliability_config.max_arguments_bytes},
+                    tenant_id=effective_tenant,
                 )
                 return self._finalize_decision(dec, start_time)
 
@@ -808,6 +1397,7 @@ class Shield:
                             trace_id=trace_id,
                             correlation_id=correlation_id,
                             metadata={"attempted_credential_key": str(k)},
+                            tenant_id=effective_tenant,
                         )
                         return self._finalize_decision(dec, start_time)
 
@@ -839,11 +1429,12 @@ class Shield:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 metadata={"error": str(e)},
+                tenant_id=effective_tenant,
             )
             return self._finalize_decision(dec, start_time)
 
-        # 0. Check paused status
-        if self.is_agent_paused(action.agent):
+        # 0. Check paused status (global or tenant-scoped)
+        if self.is_agent_paused(action.agent, tenant_id=effective_tenant):
             reasons = [f"Agent '{action.agent}' is currently paused by incident controls"]
             dec = self._build_decision(
                 allowed=False,
@@ -1142,6 +1733,7 @@ class Shield:
             )
             # Queue for approval with expires_at timestamp
             review_id = f"rev_{uuid.uuid4().hex[:10]}"
+            dec.review_id = review_id
             now = time.time()
             idempotency_key = None
             if isinstance(action.arguments, dict):
@@ -1156,6 +1748,7 @@ class Shield:
                 created_at=now,
                 expires_at=now + self.review_ttl_seconds,
                 idempotency_key=idempotency_key,
+                tenant_id=effective_tenant,
             )
             self._publish_security_event(
                 agent_id=action.agent,
@@ -1168,6 +1761,7 @@ class Shield:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 metadata={"review_id": review_id, "action": "enqueue", "arguments": action.arguments},
+                tenant_id=effective_tenant,
             )
             return self._finalize_decision(dec, start_time)
 
@@ -1198,6 +1792,7 @@ class Shield:
             trace_id=trace_id,
             correlation_id=correlation_id,
             metadata={"arguments": action.arguments},
+            tenant_id=effective_tenant,
         )
         return self._finalize_decision(dec, start_time)
 
@@ -1210,10 +1805,13 @@ class Shield:
         agent_key: Optional[str] = None,
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
     ) -> ExecutionResult:
+        effective_tenant = tenant_id or "default"
         decision = self.authorize(
             agent, tool, arguments, permissions, agent_key=agent_key,
             correlation_id=correlation_id, trace_id=trace_id,
+            tenant_id=effective_tenant,
         )
         policy_hash = self.policy_engine.version_hash
         frozen_args = decision.arguments
@@ -1221,12 +1819,16 @@ class Shield:
         if decision.decision != DecisionValue.ALLOW or not decision.allowed:
             result = ExecutionResult(decision=decision, execution_status=ExecutionStatus.NOT_EXECUTED, tool_result=None)
             if self.audit_store:
-                self.audit_store.log_decision(
-                    decision,
-                    frozen_args,
-                    execution_status="not_executed",
-                    policy_version_hash=policy_hash
-                )
+                try:
+                    self.audit_store.log_decision(
+                        decision,
+                        frozen_args,
+                        execution_status="not_executed",
+                        policy_version_hash=policy_hash,
+                        tenant_id=effective_tenant,
+                    )
+                except Exception:
+                    pass
             self._publish_security_event(
                 agent_id=decision.agent,
                 tool=decision.tool,
@@ -1238,6 +1840,7 @@ class Shield:
                 trace_id=decision.trace_id,
                 correlation_id=decision.correlation_id,
                 metadata={"execution_status": "not_executed", "arguments": frozen_args},
+                tenant_id=effective_tenant,
             )
             if hasattr(self, "metrics_collector") and self.metrics_collector:
                 self.metrics_collector.record_execution("not_executed", duration_ms=0.0)
@@ -1256,7 +1859,7 @@ class Shield:
         idempotency_key = None
         if isinstance(frozen_args, dict):
             idempotency_key = frozen_args.get("idempotency_key")
-        return self._execute_approved(decision, agent, tool, frozen_args, idempotency_key=idempotency_key)
+        return self._execute_approved(decision, agent, tool, frozen_args, idempotency_key=idempotency_key, tenant_id=effective_tenant)
 
     def _execute_approved(
         self,
@@ -1265,7 +1868,9 @@ class Shield:
         tool: str,
         arguments: Optional[Any],
         idempotency_key: Optional[str] = None,
+        tenant_id: Optional[str] = "default",
     ) -> ExecutionResult:
+        effective_tenant = tenant_id or "default"
         policy_hash = self.policy_engine.version_hash
         start_exec = time.perf_counter()
         registered_tool = self.registry.get_tool(tool)
@@ -1278,7 +1883,8 @@ class Shield:
                     arguments,
                     execution_status="not_executed",
                     error=err,
-                    policy_version_hash=policy_hash
+                    policy_version_hash=policy_hash,
+                    tenant_id=effective_tenant,
                 )
             self._publish_security_event(
                 agent_id=agent,
@@ -1291,6 +1897,7 @@ class Shield:
                 trace_id=decision.trace_id,
                 correlation_id=decision.correlation_id,
                 metadata={"execution_status": "not_executed", "error": err, "arguments": arguments},
+                tenant_id=effective_tenant,
             )
             if hasattr(self, "metrics_collector") and self.metrics_collector:
                 self.metrics_collector.record_execution("error", duration_ms=0.0)
@@ -1307,59 +1914,73 @@ class Shield:
                 )
             return result
 
+        executed = False
+        res = None
         try:
             # Safe execution adapter: pass a clean defensive copy to the callable
             # so the callable can freely modify its arguments without mutating the validated frozen snapshot
             # and ensure idempotency key reaches downstream tool.
             res = self._safe_execute_tool(registered_tool, arguments, idempotency_key=idempotency_key)
+            executed = True
             duration_ms = (time.perf_counter() - start_exec) * 1000.0
             result = ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
-            if self.audit_store:
-                self.audit_store.log_decision(
-                    decision,
-                    arguments,
-                    execution_status="executed",
-                    policy_version_hash=policy_hash
-                )
-            self._publish_security_event(
-                agent_id=agent,
-                tool=tool,
-                event_type=EventType.EXECUTION_OUTCOME.value,
-                severity=EventSeverity.LOW.value,
-                decision="ALLOW",
-                risk_score=decision.risk_score,
-                evidence=["Tool executed successfully"],
-                trace_id=decision.trace_id,
-                correlation_id=decision.correlation_id,
-                metadata={"execution_status": "executed", "arguments": arguments},
-            )
-            if hasattr(self, "metrics_collector") and self.metrics_collector:
-                self.metrics_collector.record_execution("executed", duration_ms=duration_ms)
-            if hasattr(self, "logger") and self.logger:
-                self.logger.log_execution(
-                    agent=agent,
+            try:
+                if self.audit_store:
+                    self.audit_store.log_decision(
+                        decision,
+                        arguments,
+                        execution_status="executed",
+                        policy_version_hash=policy_hash,
+                        tenant_id=effective_tenant,
+                    )
+                self._publish_security_event(
+                    agent_id=agent,
                     tool=tool,
-                    status="executed",
-                    correlation_id=decision.correlation_id,
+                    event_type=EventType.EXECUTION_OUTCOME.value,
+                    severity=EventSeverity.LOW.value,
+                    decision="ALLOW",
+                    risk_score=decision.risk_score,
+                    evidence=["Tool executed successfully"],
                     trace_id=decision.trace_id,
-                    latency_ms=duration_ms,
-                    arguments=arguments,
+                    correlation_id=decision.correlation_id,
+                    metadata={"execution_status": "executed", "arguments": arguments},
+                    tenant_id=effective_tenant,
                 )
+                if hasattr(self, "metrics_collector") and self.metrics_collector:
+                    self.metrics_collector.record_execution("executed", duration_ms=duration_ms)
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.log_execution(
+                        agent=agent,
+                        tool=tool,
+                        status="executed",
+                        correlation_id=decision.correlation_id,
+                        trace_id=decision.trace_id,
+                        latency_ms=duration_ms,
+                        arguments=arguments,
+                    )
+            except Exception:
+                pass
             return result
         except Exception as e:
+            if executed:
+                return ExecutionResult(decision=decision, execution_status=ExecutionStatus.EXECUTED, tool_result=res)
             duration_ms = (time.perf_counter() - start_exec) * 1000.0
             err_msg = str(e)
             is_timeout = "timeout" in err_msg.lower() or "timed out" in err_msg.lower()
             status_str = "timeout" if is_timeout else "error"
             result = ExecutionResult(decision=decision, execution_status=ExecutionStatus.ERROR, tool_result=None, error=err_msg)
             if self.audit_store:
-                self.audit_store.log_decision(
-                    decision,
-                    arguments,
-                    execution_status="error",
-                    error=err_msg,
-                    policy_version_hash=policy_hash
-                )
+                try:
+                    self.audit_store.log_decision(
+                        decision,
+                        arguments,
+                        execution_status="error",
+                        error=err_msg,
+                        policy_version_hash=policy_hash,
+                        tenant_id=effective_tenant,
+                    )
+                except Exception:
+                    pass
             self._publish_security_event(
                 agent_id=agent,
                 tool=tool,
@@ -1371,6 +1992,7 @@ class Shield:
                 trace_id=decision.trace_id,
                 correlation_id=decision.correlation_id,
                 metadata={"execution_status": "error", "error": err_msg, "arguments": arguments},
+                tenant_id=effective_tenant,
             )
             if hasattr(self, "metrics_collector") and self.metrics_collector:
                 self.metrics_collector.record_execution(status_str, duration_ms=duration_ms)
@@ -1419,13 +2041,20 @@ class Shield:
             execution_args["_safe_context"] = safe_context
 
         def _invoke():
+            call_fn = None
+            args_to_pass = ()
+            kwargs_to_pass = {}
             try:
                 sig = inspect.signature(registered_tool.callable_func)
                 params = list(sig.parameters.values())
                 param_names = {p.name for p in params}
                 has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
 
-                if isinstance(execution_args, dict) and params:
+                if not params:
+                    call_fn = registered_tool.callable_func
+                    args_to_pass = ()
+                    kwargs_to_pass = {}
+                elif isinstance(execution_args, dict) and params:
                     first_param = params[0].name
                     if first_param in ("args", "arguments", "payload", "data"):
                         kw = {}
@@ -1435,30 +2064,38 @@ class Shield:
                             kw["cancellation_token"] = cancellation_token
                         if (any(p.name == "idempotency_key" for p in params) or has_var_keyword) and idempotency_key:
                             kw["idempotency_key"] = idempotency_key
-                        return registered_tool.callable_func(execution_args, **kw)
+                        call_fn = registered_tool.callable_func
+                        args_to_pass = (execution_args,)
+                        kwargs_to_pass = kw
+                    else:
+                        call_kwargs = {}
+                        for k, v in execution_args.items():
+                            if k in ("_cancellation_token", "_safe_context") and not has_var_keyword and k not in param_names:
+                                continue
+                            call_kwargs[k] = v
 
-                    call_kwargs = {}
-                    for k, v in execution_args.items():
-                        if k in ("_cancellation_token", "_safe_context") and not has_var_keyword and k not in param_names:
-                            continue
-                        call_kwargs[k] = v
+                        if "cancellation_token" in param_names and "cancellation_token" not in call_kwargs:
+                            call_kwargs["cancellation_token"] = cancellation_token
+                        if "context" in param_names and "context" not in call_kwargs:
+                            call_kwargs["context"] = safe_context
 
-                    if "cancellation_token" in param_names and "cancellation_token" not in call_kwargs:
-                        call_kwargs["cancellation_token"] = cancellation_token
-                    if "context" in param_names and "context" not in call_kwargs:
-                        call_kwargs["context"] = safe_context
-
-                    if len(params) > 1 and not (
-                        len(params) == 1 and params[0].kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-                    ):
-                        return registered_tool.callable_func(**call_kwargs)
-                    elif (any(p.name == "idempotency_key" for p in params) or has_var_keyword) and idempotency_key:
-                        try:
-                            return registered_tool.callable_func(execution_args, idempotency_key=idempotency_key)
-                        except TypeError:
-                            pass
-            except (ValueError, TypeError):
+                        if (
+                            has_var_keyword
+                            or len(params) > 1
+                            or (len(params) == 1 and params[0].name in call_kwargs)
+                        ):
+                            call_fn = registered_tool.callable_func
+                            args_to_pass = ()
+                            kwargs_to_pass = call_kwargs
+                        elif (any(p.name == "idempotency_key" for p in params) or has_var_keyword) and idempotency_key:
+                            call_fn = registered_tool.callable_func
+                            args_to_pass = (execution_args,)
+                            kwargs_to_pass = {"idempotency_key": idempotency_key}
+            except Exception:
                 pass
+
+            if call_fn is not None:
+                return call_fn(*args_to_pass, **kwargs_to_pass)
 
             return registered_tool.callable_func(execution_args)
 
@@ -1486,6 +2123,7 @@ class Shield:
         arguments: Optional[Any] = None,
         trace_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        review_id: Optional[str] = None,
     ) -> Decision:
         return Decision(
             allowed=allowed,
@@ -1498,4 +2136,5 @@ class Shield:
             arguments=arguments,
             trace_id=trace_id,
             correlation_id=correlation_id,
+            review_id=review_id,
         )

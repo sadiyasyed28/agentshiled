@@ -69,7 +69,7 @@ class MockPostgresCursor:
 
             # Handle PostgreSQL ALTER TABLE ... ADD COLUMN IF NOT EXISTS on SQLite
             alter_match = re.search(
-                r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+([^;]+)",
+                r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+([^;]+)",
                 clean_q,
                 re.IGNORECASE,
             )
@@ -79,9 +79,18 @@ class MockPostgresCursor:
                 col_type = alter_match.group(3)
                 self._cur.execute(f"PRAGMA table_info({table_name});")
                 existing_cols = {row[1] for row in self._cur.fetchall()}
+                if not existing_cols:
+                    return self
                 if col_name not in existing_cols:
                     clean_q = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type};"
                 else:
+                    return self
+
+            idx_match = re.search(r"CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+\w+\s+ON\s+(\w+)", clean_q, re.IGNORECASE)
+            if idx_match:
+                table_name = idx_match.group(1)
+                self._cur.execute(f"PRAGMA table_info({table_name});")
+                if not self._cur.fetchall():
                     return self
 
             try:
@@ -581,8 +590,8 @@ def test_postgres_migration_duplicate_column_idempotent():
 
     # 1. Run all migrations once (fresh init: migration 001 creates audit_logs with correlation_id/trace_id)
     applied = mgr.run_migrations()
-    assert applied == 3
-    assert mgr.get_applied_versions() == [1, 2, 3]
+    assert applied == 4
+    assert mgr.get_applied_versions() == [1, 2, 3, 4]
 
     # 2. Directly invoke migration 003 again on the existing schema inside a transaction
     from agentshield.storage.migrations import _migration_003_audit_correlation_tracing
@@ -637,10 +646,10 @@ def test_postgres_migration_legacy_schema_without_columns():
     assert status_pre["current_version"] == 2
     assert status_pre["migrations"][2]["applied"] is False
 
-    # Apply pending migration (only 003 pending)
+    # Apply pending migrations (003 and 004 pending)
     applied = mgr.run_migrations()
-    assert applied == 1
-    assert mgr.get_applied_versions() == [1, 2, 3]
+    assert applied == 2
+    assert mgr.get_applied_versions() == [1, 2, 3, 4]
 
     # Verify columns were added to audit_logs
     with cm.get_connection() as conn:
@@ -649,6 +658,7 @@ def test_postgres_migration_legacy_schema_without_columns():
         col_names = {row[1] for row in cur.fetchall()}
         assert "correlation_id" in col_names
         assert "trace_id" in col_names
+        assert "tenant_id" in col_names
 
 
 def test_postgres_migration_genuine_failure_rolls_back():
@@ -659,16 +669,16 @@ def test_postgres_migration_genuine_failure_rolls_back():
     cm = PostgresConnectionManager(dsn="postgresql://m:m@lh/db", connection_factory=engine.get_connection)
     mgr = MigrationManager(cm)
 
-    # 1. Apply existing migrations 1..3
+    # 1. Apply existing migrations 1..4
     mgr.run_migrations()
-    assert mgr.get_applied_versions() == [1, 2, 3]
+    assert mgr.get_applied_versions() == [1, 2, 3, 4]
 
     # 2. Define a failing migration that creates a partial canary table and then fails
     def _failing_up(cursor):
         cursor.execute("CREATE TABLE partial_canary (id INTEGER PRIMARY KEY, note TEXT);")
         cursor.execute("THIS IS COMPLETELY INVALID SQL SYNTAX;")
 
-    bad_migration = Migration(version=4, name="004_failing_migration", up=_failing_up)
+    bad_migration = Migration(version=5, name="005_failing_migration", up=_failing_up)
     MIGRATIONS.append(bad_migration)
 
     try:
@@ -681,10 +691,10 @@ def test_postgres_migration_genuine_failure_rolls_back():
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='partial_canary';")
             assert cur.fetchone() is None, "partial_canary table should have been removed by rollback"
 
-        # 4. Verify version 4 was NOT recorded in schema_migrations
-        assert mgr.get_applied_versions() == [1, 2, 3]
+        # 4. Verify version 5 was NOT recorded in schema_migrations
+        assert mgr.get_applied_versions() == [1, 2, 3, 4]
         status = mgr.get_status()
-        assert status["current_version"] == 3
+        assert status["current_version"] == 4
 
         # 5. Verify the connection can be used successfully afterward
         with cm.get_connection() as conn:

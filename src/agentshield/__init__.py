@@ -1,5 +1,26 @@
 """AgentShield core package."""
-from .shield import Shield, ExecutionResult, ExecutionStatus
+
+__version__ = "0.1.0"
+
+from .shield import (
+    Shield,
+    ExecutionResult,
+    ExecutionStatus,
+    ToolBlockedError,
+    ToolReviewRequiredError,
+)
+from .models import (
+    Decision,
+    DecisionValue,
+    RiskLevel,
+)
+from .policy import (
+    PolicyEngine,
+    PolicyConfiguration,
+    AgentConfig,
+    ToolRule,
+    PolicyValidationError,
+)
 from .risk import RiskEngine
 from .detector import PromptInjectionDetector, InjectionFinding
 from .audit import AuditStore, SQLiteAuditStore, AuditRecord
@@ -30,7 +51,6 @@ from .analyst import (
     SuspiciousSequence,
     LLMProvider,
     MockLLMProvider,
-    GeminiProvider,
     SecurityAnalyst,
     ReportStore,
     SQLiteReportStore,
@@ -66,9 +86,20 @@ from .reliability import (
 from .config_validation import validate_runtime_config, sanitize_url, ConfigValidationResult
 
 __all__ = [
+    "__version__",
     "Shield",
+    "Decision",
+    "DecisionValue",
+    "RiskLevel",
     "ExecutionResult",
     "ExecutionStatus",
+    "ToolBlockedError",
+    "ToolReviewRequiredError",
+    "PolicyEngine",
+    "PolicyConfiguration",
+    "AgentConfig",
+    "ToolRule",
+    "PolicyValidationError",
     "RiskEngine",
     "PromptInjectionDetector",
     "InjectionFinding",
@@ -137,4 +168,22 @@ __all__ = [
     "validate_runtime_config",
     "sanitize_url",
     "ConfigValidationResult",
+    "AgentShieldTool",
+    "protect_langchain_tool",
+    "AgentShieldCrewAITool",
+    "protect_crewai_tool",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy import handler for optional integrations and providers."""
+    if name in ("AgentShieldTool", "protect_langchain_tool"):
+        from .integrations.langchain import AgentShieldTool, protect_langchain_tool
+        return locals()[name]
+    if name in ("AgentShieldCrewAITool", "protect_crewai_tool"):
+        from .integrations.crewai import AgentShieldCrewAITool, protect_crewai_tool
+        return locals()[name]
+    if name == "GeminiProvider":
+        from .analyst.providers.gemini import GeminiProvider
+        return GeminiProvider
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
