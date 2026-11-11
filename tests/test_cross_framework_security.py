@@ -30,7 +30,12 @@ from agentshield import (
     SQLiteAuditStore,
 )
 from agentshield.models import DecisionValue
-from langchain_core.tools import tool as lc_tool
+try:
+    from langchain_core.tools import tool as lc_tool
+    HAS_LANGCHAIN = True
+except ImportError:
+    HAS_LANGCHAIN = False
+    lc_tool = None
 
 # Mock CrewAI BaseTool if crewai is not installed (e.g. Python >= 3.14)
 class MockCrewAIBaseTool(BaseModel):
@@ -128,6 +133,8 @@ def setup_path_runner(path: str, shield: Shield, tool_name: str, target_callable
         return decorated
 
     elif path == "langchain":
+        if not HAS_LANGCHAIN:
+            pytest.skip("langchain-core is not installed")
         doc = target_callable.__doc__ or "LangChain tool doc"
         wrapped = shield.protect_langchain_tool(
             target_callable,
@@ -287,6 +294,8 @@ def test_decorator_escape_path_forbidden():
 
 
 def test_langchain_escape_path_forbidden():
+    if not HAS_LANGCHAIN:
+        pytest.skip("langchain-core is not installed")
     shield = create_security_test_shield()
 
     @lc_tool

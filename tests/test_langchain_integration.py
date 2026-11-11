@@ -6,7 +6,17 @@ from typing import Optional, Type
 import pytest
 from pydantic import BaseModel, Field
 
-from langchain_core.tools import BaseTool, StructuredTool, tool
+try:
+    import langchain_core
+    from langchain_core.tools import BaseTool, StructuredTool, tool
+    HAS_LANGCHAIN = True
+except ImportError:
+    HAS_LANGCHAIN = False
+
+pytest.importorskip(
+    "langchain_core",
+    reason="langchain-core is not installed in the environment."
+)
 
 from agentshield import (
     Shield,

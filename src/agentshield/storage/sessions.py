@@ -6,7 +6,7 @@ Provides multi-instance session revocation consistency across serverless workers
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from agentshield.storage.connection import PostgresConnectionManager
 
