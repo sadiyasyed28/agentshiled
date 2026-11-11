@@ -649,7 +649,12 @@ def create_app(
     @app.get("/api/stats", response_model=OverviewStatsResponse)
     def get_overview_stats(request: Request, tenant_id: Optional[str] = None):
         auth_ctx = _get_optional_auth(request)
-        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id) if auth_ctx else (tenant_id or "default")
+        if not auth_ctx:
+            if tenant_id and tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         records = audit_store.query(limit=500, tenant_id=effective_tenant)
         allow_count = sum(1 for r in records if r.decision == "ALLOW")
         review_count = sum(1 for r in records if r.decision == "REVIEW")
@@ -842,6 +847,13 @@ def create_app(
     def authorize_action(req: AuthorizeRequest, request: Request):
         _check_public_payload_size(request)
         _check_public_rate_limit(request)
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if req.tenant_id and req.tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
         corr_id = (
             req.arguments.get("correlation_id")
             if isinstance(req.arguments, dict) and "correlation_id" in req.arguments
@@ -853,6 +865,7 @@ def create_app(
             arguments=req.arguments,
             permissions=req.permissions,
             correlation_id=corr_id,
+            tenant_id=effective_tenant,
         )
         return DecisionResponse(
             allowed=decision.allowed,
@@ -871,6 +884,13 @@ def create_app(
     def execute_action(req: ExecuteRequest, request: Request):
         _check_public_payload_size(request)
         _check_public_rate_limit(request)
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if req.tenant_id and req.tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
         if req.tool not in ALLOWED_PUBLIC_SANDBOX_TOOLS:
             raise HTTPException(
                 status_code=403,
@@ -887,6 +907,7 @@ def create_app(
             arguments=req.arguments,
             permissions=req.permissions,
             correlation_id=corr_id,
+            tenant_id=effective_tenant,
         )
         dec_resp = DecisionResponse(
             allowed=res.decision.allowed,
@@ -910,6 +931,7 @@ def create_app(
 
     @app.get("/events", response_model=EventsResponse)
     def list_events_public(
+        request: Request,
         decision: Optional[str] = None,
         agent: Optional[str] = None,
         tool: Optional[str] = None,
@@ -917,13 +939,20 @@ def create_app(
         tenant_id: Optional[str] = None,
         limit: int = 50,
     ):
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if tenant_id and tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         records = audit_store.query(
             decision=decision,
             agent=agent,
             tool=tool,
             correlation_id=correlation_id,
             limit=limit,
-            tenant_id=tenant_id or "default",
+            tenant_id=effective_tenant,
         )
         items = [
             EventItem(
@@ -1049,7 +1078,12 @@ def create_app(
     @app.get("/api/incident/agents")
     def list_agents(request: Request, tenant_id: Optional[str] = None):
         auth_ctx = _get_optional_auth(request)
-        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id) if auth_ctx else (tenant_id or "default")
+        if not auth_ctx:
+            if tenant_id and tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         return {"paused_agents": sorted(list(shield.get_paused_agents(tenant_id=effective_tenant)))}
 
     @app.get("/policies", response_model=PoliciesResponse)
@@ -1471,15 +1505,16 @@ def create_app(
     @app.get("/incident/report/{incident_id}", response_model=AnalysisResponse)
     @app.get("/api/incident/report/{incident_id}", response_model=AnalysisResponse)
     @app.get("/api/security/incidents/{incident_id}/investigation", response_model=AnalysisResponse)
-    def investigate_security_incident(incident_id: str, request: Request):
-        _verify_admin(request)
+    def investigate_security_incident(incident_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         _check_analyst_rate_limit(request)
         if not re.match(r"^[a-zA-Z0-9_\-\.:]{1,128}$", incident_id):
             raise HTTPException(status_code=400, detail="Invalid incident_id format")
         if not security_analyst:
             raise HTTPException(status_code=503, detail="Security Analyst service is not configured")
         active_store = security_analyst.event_store or event_store
-        if not active_store or not active_store.get_incident(incident_id):
+        if not active_store or not active_store.get_incident(incident_id, tenant_id=effective_tenant):
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
 
         try:
@@ -1504,7 +1539,8 @@ def create_app(
     @app.post("/api/incident/report", response_model=AnalysisResponse)
     @app.post("/api/security/analyst/analyze", response_model=AnalysisResponse)
     def analyze_security_incident(req: AnalysisRequest, request: Request):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
         _check_analyst_rate_limit(request)
         if not security_analyst:
             raise HTTPException(status_code=503, detail="Security Analyst service is not configured")
@@ -1514,7 +1550,7 @@ def create_app(
                 if not re.match(r"^[a-zA-Z0-9_\-\.:]{1,128}$", req.incident_id):
                     raise HTTPException(status_code=400, detail="Invalid incident_id format")
                 active_store = security_analyst.event_store or event_store
-                if not active_store or not active_store.get_incident(req.incident_id):
+                if not active_store or not active_store.get_incident(req.incident_id, tenant_id=effective_tenant):
                     raise HTTPException(status_code=404, detail=f"Security incident '{req.incident_id}' not found")
                 report = security_analyst.investigate_incident(req.incident_id)
             elif req.correlation_id:
@@ -1544,16 +1580,18 @@ def create_app(
     def list_incident_reports(
         incident_id: str,
         request: Request,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         active_report_store = getattr(security_analyst, "report_store", None) or report_store
         if not active_report_store:
             raise HTTPException(status_code=503, detail="Investigation Report store is not configured")
 
         active_event_store = getattr(security_analyst, "event_store", None) or event_store
-        if active_event_store and not active_event_store.get_incident(incident_id):
+        if active_event_store and not active_event_store.get_incident(incident_id, tenant_id=effective_tenant):
             raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
 
         try:
@@ -1569,8 +1607,9 @@ def create_app(
             raise HTTPException(status_code=500, detail=f"Failed to retrieve incident reports: {str(e)}")
 
     @app.get("/api/security/reports/{report_id}", response_model=AnalysisResponse)
-    def get_investigation_report(report_id: str, request: Request):
-        _verify_admin(request)
+    def get_investigation_report(report_id: str, request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         active_report_store = getattr(security_analyst, "report_store", None) or report_store
         if not active_report_store:
             raise HTTPException(status_code=503, detail="Investigation Report store is not configured")
@@ -1579,6 +1618,10 @@ def create_app(
             report = active_report_store.get_report(report_id)
             if not report:
                 raise HTTPException(status_code=404, detail=f"Investigation report '{report_id}' not found")
+            if auth_ctx.role != "global_admin" and report.incident_id:
+                active_event_store = getattr(security_analyst, "event_store", None) or event_store
+                if active_event_store and not active_event_store.get_incident(report.incident_id, tenant_id=effective_tenant):
+                    raise HTTPException(status_code=404, detail=f"Investigation report '{report_id}' not found")
             return AnalysisResponse(report=report.to_dict())
         except HTTPException:
             raise
@@ -1592,13 +1635,19 @@ def create_app(
         request: Request,
         incident_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ):
-        _verify_admin(request)
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
         active_report_store = getattr(security_analyst, "report_store", None) or report_store
         if not active_report_store:
             raise HTTPException(status_code=503, detail="Investigation Report store is not configured")
+
+        active_event_store = getattr(security_analyst, "event_store", None) or event_store
+        if incident_id and active_event_store and not active_event_store.get_incident(incident_id, tenant_id=effective_tenant):
+            raise HTTPException(status_code=404, detail=f"Security incident '{incident_id}' not found")
 
         try:
             reports = active_report_store.query_reports(
@@ -1607,7 +1656,12 @@ def create_app(
                 limit=limit,
                 offset=offset,
             )
-            total_count = active_report_store.count_reports(
+            if auth_ctx.role != "global_admin" and not incident_id and active_event_store:
+                tenant_incidents = active_event_store.query_incidents(tenant_id=effective_tenant, limit=500)
+                allowed_ids = {i.incident_id for i in tenant_incidents}
+                reports = [r for r in reports if r.incident_id in allowed_ids]
+
+            total_count = len(reports) if (auth_ctx.role != "global_admin" and not incident_id) else active_report_store.count_reports(
                 incident_id=incident_id,
                 correlation_id=correlation_id,
             )

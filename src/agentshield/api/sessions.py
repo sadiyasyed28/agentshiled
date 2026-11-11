@@ -255,15 +255,15 @@ class SessionManager:
     def create_session(
         self,
         user: str = "admin",
+        user_id: Optional[str] = None,
         tenant_id: str = "default",
         role: str = "tenant_admin",
-        user_id: Optional[str] = None,
     ) -> Tuple[str, float]:
         """Generate a cryptographically signed session token and record it in the store."""
+        effective_user = user_id or user
         now = time.time()
         expires_at = now + self.ttl_seconds
         jti = uuid.uuid4().hex
-        effective_user = user_id or user
         payload = {
             "sub": effective_user,
             "tenant_id": tenant_id,

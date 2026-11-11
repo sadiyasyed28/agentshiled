@@ -19,12 +19,14 @@ class AuthorizeRequest(BaseModel):
     tool: str = Field(..., min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_\-\.:]+$")
     arguments: Dict[str, Any] = Field(default_factory=dict)
     permissions: List[str] = Field(default_factory=list)
+    tenant_id: Optional[str] = Field(None, max_length=128)
 
 class ExecuteRequest(BaseModel):
     agent: str = Field(..., min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_\-\.:]+$")
     tool: str = Field(..., min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_\-\.:]+$")
     arguments: Dict[str, Any] = Field(default_factory=dict)
     permissions: List[str] = Field(default_factory=list)
+    tenant_id: Optional[str] = Field(None, max_length=128)
 
 class DecisionResponse(BaseModel):
     allowed: bool
@@ -155,6 +157,7 @@ class AnalysisRequest(BaseModel):
     incident_id: Optional[str] = Field(None, max_length=128, pattern=r"^[a-zA-Z0-9_\-\.:]+$")
     correlation_id: Optional[str] = Field(None, max_length=128, pattern=r"^[a-zA-Z0-9_\-\.:]+$")
     force_refresh: Optional[bool] = False
+    tenant_id: Optional[str] = Field(None, max_length=128)
 
 class AnalysisResponse(BaseModel):
     report: Dict[str, Any]
