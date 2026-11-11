@@ -6,6 +6,10 @@
 
 AgentShield is an open-source, framework-independent Python runtime security SDK and enforcement layer for tool-using AI agents. When an AI agent proposes an action, AgentShield authenticates the agent, validates argument schemas, computes deterministic risk scores, and applies code-defined deterministic security policies (`ALLOW` / `REVIEW` / `BLOCK`). Only permitted actions are executed; every evaluation and execution is recorded to a cryptographically chained audit ledger.
 
+AgentShield operates in two primary modes:
+1. **Standalone Python SDK (`pip install agentshield`)**: A lightweight, zero-network-dependency library embedded directly within Python agent applications. Requires only `pydantic>=2.0`, using an embedded SQLite cryptographic ledger by default.
+2. **Hosted Security Dashboard & API**: An optional FastAPI server and retro 16-bit React dashboard supporting multi-tenant isolation, session-based human-in-the-loop approvals, PostgreSQL persistence, and incident investigation.
+
 ```
 +--------------------+        +-----------------------+        +---------------+
 |     AI Agent       | -----> |      AgentShield      | -----> | External Tool |
@@ -113,6 +117,7 @@ AgentShield provides pluggable, ACID-compliant persistent storage for audit logs
 | **Atomic At-Most-Once Execution** | Competing supervisor approvals for the same review resolve atomically; exactly one worker executes the tool callable. Repeated or replayed approvals fail closed. |
 | **Incident Containment** | Paused agents cannot execute tools under any circumstance—including via supervisor review approval. Approvals for paused agents immediately fail closed. |
 | **Secret Redaction** | Sensitive credentials (passwords, bearer tokens, API keys, private keys) are automatically sanitized across audit stores, review arguments, and event logs. |
+| **Execution Sandboxing** | AgentShield validates parameters and governs authorization deterministically; it does not provide OS-level container isolation (e.g., Docker/gVisor/chroot) for arbitrary hostile bytecode. Tools executing untrusted arbitrary code should run inside isolated sandboxes. |
 | **Operational Boundaries** | Framework callbacks (e.g. LangChain `on_tool_start` or CrewAI agent loggers) run outside AgentShield's execution boundary; callers must ensure sensitive variables are not printed by external hooks. |
 
 ---
@@ -566,4 +571,4 @@ npm --prefix frontend run build
 
 ## License
 
-Apache 2.0. See `LICENSE` for details.
+MIT License. See `LICENSE` for details.

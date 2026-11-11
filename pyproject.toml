@@ -5,12 +5,46 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentshield"
 version = "0.1.0"
-description = "An open-source runtime security and control layer for AI agents."
+description = "Open-source, framework-independent Python runtime security SDK for tool-using AI agents."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "AgentShield Contributors" }
+]
+keywords = [
+    "security",
+    "ai-agents",
+    "llm",
+    "runtime-security",
+    "tool-use",
+    "policy-enforcement",
+    "guardrails",
+    "langchain",
+    "crewai",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "pydantic>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://agentshiled.vercel.app"
+Repository = "https://github.com/sadiyasyed28/agentshiled"
+Issues = "https://github.com/sadiyasyed28/agentshiled/issues"
+Documentation = "https://github.com/sadiyasyed28/agentshiled#readme"
 
 [project.optional-dependencies]
 yaml = [

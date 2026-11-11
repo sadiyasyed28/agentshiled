@@ -55,3 +55,9 @@ jobs:
     - name: Run pytest test suite
       run: |
         python -m pytest -v --tb=short
+
+    - name: Validate package build & distribution
+      run: |
+        pip install build twine
+        python -m build
+        twine check dist/*.whl dist/*.tar.gz

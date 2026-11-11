@@ -625,3 +625,20 @@ def test_optional_dependency_isolation():
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert res.returncode == 0, f"Optional module eagerly loaded by core SDK! {res.stderr}"
+
+
+# ============================================================================
+# 12. Public SDK Package Exports & Version
+# ============================================================================
+
+def test_public_sdk_exports():
+    """Verify top-level package exports, versioning, and core symbols."""
+    import agentshield
+    assert hasattr(agentshield, "__version__")
+    assert agentshield.__version__ == "0.1.0"
+    assert agentshield.Decision is Decision
+    assert agentshield.DecisionValue is DecisionValue
+    assert agentshield.RiskLevel is RiskLevel
+    assert "Shield" in agentshield.__all__
+    assert "__version__" in agentshield.__all__
+    assert "Decision" in agentshield.__all__

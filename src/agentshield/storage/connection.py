@@ -37,7 +37,8 @@ class PostgresConnectionManager:
             if not available:
                 raise ConfigurationError(
                     "PostgreSQL backend selected via AGENTSHIELD_DATABASE_URL, but no PostgreSQL driver "
-                    "(psycopg or psycopg2) is installed in the Python environment."
+                    "(psycopg or psycopg2) is installed in the Python environment. "
+                    "Install it with: pip install 'agentshield[postgres]'"
                 )
             self._driver_name = driver_name
         else:

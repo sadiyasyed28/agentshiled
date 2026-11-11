@@ -160,7 +160,7 @@ class GeminiProvider(LLMProvider):
         if not HAS_GOOGLE_GENAI and self._client is None:
             raise ProviderError(
                 "The 'google-genai' SDK is required for GeminiProvider. "
-                "Install it via 'pip install google-genai'."
+                "Install it via: pip install 'agentshield[gemini]'"
             )
 
         # Lazy client initialization if not injected

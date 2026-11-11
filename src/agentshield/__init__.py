@@ -1,10 +1,18 @@
 """AgentShield core package."""
+
+__version__ = "0.1.0"
+
 from .shield import (
     Shield,
     ExecutionResult,
     ExecutionStatus,
     ToolBlockedError,
     ToolReviewRequiredError,
+)
+from .models import (
+    Decision,
+    DecisionValue,
+    RiskLevel,
 )
 from .policy import (
     PolicyEngine,
@@ -78,7 +86,11 @@ from .reliability import (
 from .config_validation import validate_runtime_config, sanitize_url, ConfigValidationResult
 
 __all__ = [
+    "__version__",
     "Shield",
+    "Decision",
+    "DecisionValue",
+    "RiskLevel",
     "ExecutionResult",
     "ExecutionStatus",
     "ToolBlockedError",
