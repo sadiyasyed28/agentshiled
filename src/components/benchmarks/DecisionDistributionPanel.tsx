@@ -8,7 +8,7 @@ interface DecisionDistributionPanelProps {
 }
 
 export const DecisionDistributionPanel: React.FC<DecisionDistributionPanelProps> = ({ currentRun }) => {
-  const total = currentRun.total || 32;
+  const total = currentRun.total;
   const allowed = currentRun.allowedCount;
   const review = currentRun.reviewCount;
   const blocked = currentRun.blockedCount;
@@ -21,9 +21,9 @@ export const DecisionDistributionPanel: React.FC<DecisionDistributionPanelProps>
   const radius = 54;
   const circumference = 2 * Math.PI * radius; // ~339.292
 
-  const allowedDash = (allowed / total) * circumference;
-  const reviewDash = (review / total) * circumference;
-  const blockedDash = (blocked / total) * circumference;
+  const allowedDash = total > 0 ? (allowed / total) * circumference : 0;
+  const reviewDash = total > 0 ? (review / total) * circumference : 0;
+  const blockedDash = total > 0 ? (blocked / total) * circumference : 0;
 
   const allowedOffset = 0;
   const reviewOffset = -allowedDash;

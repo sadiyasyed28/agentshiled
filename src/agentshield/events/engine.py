@@ -55,6 +55,8 @@ class SecurityEventManager:
         correlation_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         tenant_id: Optional[str] = "default",
+        timestamp: Optional[str] = None,
+        event_id: Optional[str] = None,
     ) -> SecurityEvent:
         """Publishes a security event, evaluates alert rules, and correlates incidents."""
         evt_trace = trace_id or f"trc_{uuid.uuid4().hex[:12]}"
@@ -68,8 +70,8 @@ class SecurityEventManager:
             clean_metadata = {"data": clean_metadata}
 
         event = SecurityEvent(
-            event_id=f"evt_{uuid.uuid4().hex[:12]}",
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            event_id=event_id or f"evt_{uuid.uuid4().hex[:12]}",
+            timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
             agent_id=agent_id or "unknown",
             tool=tool or "unknown",
             event_type=event_type,

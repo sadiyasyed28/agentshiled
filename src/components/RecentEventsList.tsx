@@ -21,50 +21,7 @@ export const RecentEventsList: React.FC<RecentEventsListProps> = ({
   onViewAll,
   events: customEvents,
 }) => {
-  const defaultEvents: SecurityEvent[] = [
-    {
-      id: 'evt-1',
-      agent: 'research-agent',
-      action: 'read_web',
-      decision: 'Allowed',
-      riskScore: 12,
-      timestamp: '2 min ago',
-      payloadSummary: 'GET https://arxiv.org/html/2401.001 - Status 200 OK',
-      reason: 'Standard read-only query matching approved research pattern.',
-    },
-    {
-      id: 'evt-2',
-      agent: 'email-agent',
-      action: 'send_email',
-      decision: 'Blocked',
-      riskScore: 87,
-      timestamp: '7 min ago',
-      payloadSummary: 'POST smtp://relay.corp.internal - Target: external_dump@unknown.net',
-      reason: 'Unauthorized external data exfiltration attempt blocked by egress firewall.',
-    },
-    {
-      id: 'evt-3',
-      agent: 'ops-agent',
-      action: 'list_files',
-      decision: 'Review',
-      riskScore: 68,
-      timestamp: '12 min ago',
-      payloadSummary: 'LS -la /var/run/secrets/kubernetes.io/serviceaccount',
-      reason: 'Sensitive token directory inspection requested; flagged for supervisor review.',
-    },
-    {
-      id: 'evt-4',
-      agent: 'data-agent',
-      action: 'query_db',
-      decision: 'Allowed',
-      riskScore: 24,
-      timestamp: '18 min ago',
-      payloadSummary: 'SELECT COUNT(*) FROM telemetry_logs WHERE created_at > NOW() - 1h',
-      reason: 'Authorized read telemetry aggregate query executed within memory quota.',
-    },
-  ];
-
-  const events = customEvents && customEvents.length > 0 ? customEvents : defaultEvents;
+  const events = customEvents || [];
 
   const getStatusIcon = (decision: SecurityEvent['decision']) => {
     switch (decision) {
@@ -88,6 +45,7 @@ export const RecentEventsList: React.FC<RecentEventsListProps> = ({
           <h3 className="text-[13.5px] font-bold text-white tracking-tight">
             Recent Events
           </h3>
+          <span className="text-[11px] font-mono text-[#847ea8]">({events.length})</span>
         </div>
 
         <button
@@ -99,35 +57,47 @@ export const RecentEventsList: React.FC<RecentEventsListProps> = ({
         </button>
       </div>
 
-      {/* Event Items */}
+      {/* Event Items or Empty State */}
       <div className="flex flex-col justify-between gap-1.5 my-auto py-1">
-        {events.slice(0, 4).map((evt) => (
-          <button
-            key={evt.id}
-            onClick={() => onSelectEvent(evt)}
-            className="flex items-center justify-between w-full py-1.5 px-2 rounded-lg text-left hover:bg-[#201d44] transition-colors group"
-          >
-            {/* Left: Status Icon + Event Name & Subtitle */}
-            <div className="flex items-center gap-2.5">
-              <div className="flex-shrink-0 flex items-center justify-center">
-                {getStatusIcon(evt.decision)}
-              </div>
-              <div className="flex flex-col">
-                <span className="text-[12px] font-semibold text-white group-hover:text-[#c4bbf0] transition-colors">
-                  {evt.agent} · {evt.action}
-                </span>
-                <span className="text-[11px] text-[#8680b5] font-medium">
-                  {evt.decision} · Risk <AnimatedNumber value={evt.riskScore} />
-                </span>
-              </div>
+        {events.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-7 text-center">
+            <div className="w-8 h-8 rounded-lg bg-[#2b1f59] text-[#c084fc] flex items-center justify-center mb-2 shadow-xs">
+              <PixelLayersIcon size={18} />
             </div>
-
-            {/* Right: Timestamp */}
-            <span className="text-[11px] text-[#7d77a8] font-medium whitespace-nowrap pl-2">
-              {evt.timestamp}
+            <span className="text-[13px] font-semibold text-white">No Recent Events</span>
+            <span className="text-[11.5px] text-[#847ea8] mt-1 max-w-[280px]">
+              Live security decisions will appear here as your agents invoke tools.
             </span>
-          </button>
-        ))}
+          </div>
+        ) : (
+          events.slice(0, 4).map((evt) => (
+            <button
+              key={evt.id}
+              onClick={() => onSelectEvent(evt)}
+              className="flex items-center justify-between w-full py-1.5 px-2 rounded-lg text-left hover:bg-[#201d44] transition-colors group"
+            >
+              {/* Left: Status Icon + Event Name & Subtitle */}
+              <div className="flex items-center gap-2.5">
+                <div className="flex-shrink-0 flex items-center justify-center">
+                  {getStatusIcon(evt.decision)}
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-[12px] font-semibold text-white group-hover:text-[#c4bbf0] transition-colors">
+                    {evt.agent} · {evt.action}
+                  </span>
+                  <span className="text-[11px] text-[#8680b5] font-medium">
+                    {evt.decision} · Risk <AnimatedNumber value={evt.riskScore} />
+                  </span>
+                </div>
+              </div>
+
+              {/* Right: Timestamp */}
+              <span className="text-[11px] text-[#7d77a8] font-medium whitespace-nowrap pl-2">
+                {evt.timestamp}
+              </span>
+            </button>
+          ))
+        )}
       </div>
     </PixelCard>
   );

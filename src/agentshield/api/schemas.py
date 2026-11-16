@@ -77,6 +77,7 @@ class EventItem(BaseModel):
     correlation_id: Optional[str] = None
     trace_id: Optional[str] = None
     tenant_id: Optional[str] = "default"
+    event_id: Optional[str] = None
 
 class EventsResponse(BaseModel):
     events: List[EventItem]
@@ -167,8 +168,65 @@ class AnalysisReportsListResponse(BaseModel):
     total: int
 
 class AuthLoginRequest(BaseModel):
-    admin_key: str = Field(..., max_length=1024, description="Administrative authentication key")
+    admin_key: Optional[str] = Field(None, max_length=1024, description="Administrative authentication key")
+    email: Optional[str] = Field(None, max_length=256, description="Developer / owner email")
+    password: Optional[str] = Field(None, max_length=128, description="Account password")
     tenant_id: Optional[str] = Field(None, max_length=128, description="Target tenant ID (optional)")
+
+class RegisterTenantRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=128, description="Workspace / organization name")
+    email: str = Field(..., min_length=5, max_length=256, description="Developer / owner email")
+    password: str = Field(..., min_length=8, max_length=128, description="Account password (min 8 characters)")
+    tenant_id: Optional[str] = Field(None, max_length=64, pattern=r"^[a-zA-Z0-9_\-]+$", description="Optional custom workspace slug")
+
+class RegisterTenantResponse(BaseModel):
+    status: str = "created"
+    tenant_id: str
+    name: str
+    email: str
+    api_key: str
+    key_id: str
+    masked_key: str
+    csrf_token: Optional[str] = None
+    created_at: float
+
+class ApiKeyItem(BaseModel):
+    key_id: str
+    tenant_id: str
+    name: str
+    prefix: str
+    last_four: str
+    masked_key: str
+    created_at: float
+    revoked_at: Optional[float] = None
+    last_used_at: Optional[float] = None
+    is_active: bool
+
+class ApiKeysListResponse(BaseModel):
+    keys: List[ApiKeyItem]
+    total: int
+
+class CreateApiKeyRequest(BaseModel):
+    name: str = Field("Default Key", min_length=1, max_length=128)
+    prefix: str = Field("ash_live", min_length=2, max_length=32, pattern=r"^[a-zA-Z0-9_]+$")
+
+class ApiKeyCreatedResponse(BaseModel):
+    status: str = "created"
+    key_id: str
+    tenant_id: str
+    name: str
+    masked_key: str
+    api_key: str
+    created_at: float
+
+class RotateApiKeyRequest(BaseModel):
+    name: Optional[str] = Field(None, max_length=128)
+
+class TenantMeResponse(BaseModel):
+    tenant_id: str
+    name: str
+    owner_email: str
+    created_at: float
 
 class AuthSessionResponse(BaseModel):
     authenticated: bool
@@ -326,3 +384,33 @@ class RuntimeConfigResponse(BaseModel):
     circuit_breaker_recovery_timeout: float
     policy_version_hash: str
     admin_auth_configured: bool
+
+class TelemetryEventItem(BaseModel):
+    event_id: Optional[str] = Field(None, max_length=128)
+    timestamp: Optional[str] = None
+    agent: str = Field("unknown", max_length=256)
+    tool: str = Field("unknown", max_length=256)
+    decision: str = Field("BLOCK", max_length=32)
+    allowed: bool = False
+    reasons: List[str] = Field(default_factory=list)
+    rules_triggered: List[str] = Field(default_factory=list)
+    risk_score: float = 0.0
+    severity: str = Field("LOW", max_length=32)
+    execution_status: str = Field("not_executed", max_length=32)
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+    policy_version_hash: Optional[str] = None
+    correlation_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    event_type: str = Field("authorization_decision", max_length=64)
+
+class TelemetryIngestRequest(BaseModel):
+    events: List[TelemetryEventItem] = Field(..., max_length=100)
+    tenant_id: Optional[str] = Field(None, max_length=128)
+
+class TelemetryIngestResponse(BaseModel):
+    status: str = "accepted"
+    ingested: int
+    duplicates: int = 0
+    tenant_id: str

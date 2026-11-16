@@ -22,6 +22,13 @@ from agentshield.storage.migrations import MIGRATIONS, MigrationManager
 from agentshield.storage.review import PostgresReviewStore
 from agentshield.storage.sessions import PostgresSessionStore
 from agentshield.storage.simulation import PostgresSimulationStore
+from agentshield.storage.tenants import (
+    PostgresTenantStore,
+    SqliteTenantStore,
+    Tenant,
+    TenantApiKey,
+    TenantStore,
+)
 
 __all__ = [
     "ConfigurationError",
@@ -35,7 +42,12 @@ __all__ = [
     "PostgresReviewStore",
     "PostgresSessionStore",
     "PostgresSimulationStore",
+    "PostgresTenantStore",
+    "SqliteTenantStore",
     "StoreBundle",
+    "Tenant",
+    "TenantApiKey",
+    "TenantStore",
     "check_driver_available",
     "create_postgres_stores",
     "create_stores",

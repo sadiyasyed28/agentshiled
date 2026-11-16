@@ -294,6 +294,36 @@ def _migration_004_tenant_isolation_schema(cursor: Any) -> None:
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{incidents_tbl}_tenant ON {incidents_tbl}(tenant_id);")
 
 
+def _migration_005_tenant_onboarding_keys(cursor: Any) -> None:
+    """Migration 005: Persistent multi-tenant workspaces and hashed API keys."""
+    _execute_script(cursor, """
+        CREATE TABLE IF NOT EXISTS tenants (
+            tenant_id VARCHAR(128) PRIMARY KEY,
+            name VARCHAR(256) NOT NULL,
+            owner_email VARCHAR(256) NOT NULL UNIQUE,
+            password_hash VARCHAR(128) NOT NULL,
+            password_salt VARCHAR(128) NOT NULL,
+            created_at DOUBLE PRECISION NOT NULL,
+            updated_at DOUBLE PRECISION NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tenants_email ON tenants(owner_email);
+
+        CREATE TABLE IF NOT EXISTS tenant_api_keys (
+            key_id VARCHAR(64) PRIMARY KEY,
+            tenant_id VARCHAR(128) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+            name VARCHAR(256) NOT NULL,
+            key_hash VARCHAR(128) NOT NULL UNIQUE,
+            prefix VARCHAR(32) NOT NULL,
+            last_four VARCHAR(16) NOT NULL,
+            created_at DOUBLE PRECISION NOT NULL,
+            revoked_at DOUBLE PRECISION,
+            last_used_at DOUBLE PRECISION
+        );
+        CREATE INDEX IF NOT EXISTS idx_tenant_keys_tenant ON tenant_api_keys(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_tenant_keys_hash ON tenant_api_keys(key_hash);
+    """)
+
+
 # Registry of ordered schema migrations
 MIGRATIONS: List[Migration] = [
     Migration(
@@ -315,6 +345,11 @@ MIGRATIONS: List[Migration] = [
         version=4,
         name="004_tenant_isolation_schema",
         up=_migration_004_tenant_isolation_schema,
+    ),
+    Migration(
+        version=5,
+        name="005_tenant_onboarding_keys",
+        up=_migration_005_tenant_onboarding_keys,
     ),
 ]
 

@@ -25,16 +25,14 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
   isRefreshingGlobal = false,
 }) => {
   // Datasets for all 4 statuses
-  const [pendingList, setPendingList] = useState<ReviewRequest[]>(INITIAL_PENDING_REQUESTS);
-  const [approvedList, setApprovedList] = useState<ReviewRequest[]>(INITIAL_APPROVED_REQUESTS);
-  const [deniedList, setDeniedList] = useState<ReviewRequest[]>(INITIAL_DENIED_REQUESTS);
-  const [expiredList] = useState<ReviewRequest[]>(INITIAL_EXPIRED_REQUESTS);
+  const [pendingList, setPendingList] = useState<ReviewRequest[]>([]);
+  const [approvedList, setApprovedList] = useState<ReviewRequest[]>([]);
+  const [deniedList, setDeniedList] = useState<ReviewRequest[]>([]);
+  const [expiredList] = useState<ReviewRequest[]>([]);
   const [isLive, setIsLive] = useState(false);
-
-  // Initial base offsets matching IMAGE B exact counts (Pending: 6, Approved: 38, Denied: 21, Expired: 4)
-  const approvedCountOffset = 37; // 1 initial item + 37 = 38
-  const deniedCountOffset = 20;   // 1 initial item + 20 = 21
-  const expiredCountOffset = 3;   // 1 initial item + 3 = 4
+  const [isLoading, setIsLoading] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [showReferenceFixtures, setShowReferenceFixtures] = useState(false);
 
   // Status Tab
   const [currentStatus, setCurrentStatus] = useState<ReviewStatus>('Pending');
@@ -107,20 +105,25 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
   };
 
   const loadReviews = async () => {
+    setIsLoading(true);
+    setApiError(null);
     try {
       const res = await apiClient.getReviews();
-      if (res && Array.isArray(res.reviews) && res.reviews.length > 0) {
+      if (res && Array.isArray(res.reviews)) {
         const mapped = res.reviews.map(mapApiReviewToRequest);
         setPendingList(mapped);
         setIsLive(true);
       } else {
-        setPendingList(INITIAL_PENDING_REQUESTS);
+        setPendingList([]);
         setIsLive(false);
       }
-    } catch {
-      // Offline fallback
-      setPendingList(INITIAL_PENDING_REQUESTS);
+    } catch (err: unknown) {
+      const msg = (err as Error)?.message || 'Failed to fetch reviews from server';
+      setApiError(msg);
+      setPendingList([]);
       setIsLive(false);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -181,19 +184,25 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
     });
   };
 
+  // Effective datasets (either live or user-requested reference fixtures)
+  const effectivePending = showReferenceFixtures ? INITIAL_PENDING_REQUESTS : pendingList;
+  const effectiveApproved = showReferenceFixtures ? INITIAL_APPROVED_REQUESTS : approvedList;
+  const effectiveDenied = showReferenceFixtures ? INITIAL_DENIED_REQUESTS : deniedList;
+  const effectiveExpired = showReferenceFixtures ? INITIAL_EXPIRED_REQUESTS : expiredList;
+
   // Active dataset based on tab
   const activeDataset = useMemo(() => {
     switch (currentStatus) {
       case 'Pending':
-        return pendingList;
+        return effectivePending;
       case 'Approved':
-        return approvedList;
+        return effectiveApproved;
       case 'Denied':
-        return deniedList;
+        return effectiveDenied;
       case 'Expired':
-        return expiredList;
+        return effectiveExpired;
     }
-  }, [currentStatus, pendingList, approvedList, deniedList, expiredList]);
+  }, [currentStatus, effectivePending, effectiveApproved, effectiveDenied, effectiveExpired]);
 
   // Filtered & Sorted records
   const filteredRequests = useMemo(() => {
@@ -341,19 +350,75 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
             selectedRequest ? 'lg:col-span-8' : 'lg:col-span-12'
           }`}
         >
-          {/* Status Indicator Banner */}
-          <div className="flex items-center justify-between pb-1.5">
-            <span
-              className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
-                isLive
-                  ? 'bg-[#153e28] text-[#4ade80] border-[#1b6d39]'
-                  : 'bg-[#2b2559] text-[#c084fc] border-[#3e3478]'
-              }`}
+          {/* Status Indicator Banner & Dataset Mode Toggle */}
+          <div className="flex items-center justify-between pb-1.5 flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
+                  showReferenceFixtures
+                    ? 'bg-[#2b2559] text-[#c084fc] border-[#3e3478]'
+                    : isLive
+                    ? 'bg-[#153e28] text-[#4ade80] border-[#1b6d39]'
+                    : 'bg-[#1f1b3d] text-[#9c96c9] border-[#342e61]'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    showReferenceFixtures
+                      ? 'bg-[#c084fc]'
+                      : isLive
+                      ? 'bg-[#4ade80]'
+                      : 'bg-[#736c9e]'
+                  }`}
+                />
+                {showReferenceFixtures
+                  ? 'REFERENCE REVIEW DATASET (Demo Suite)'
+                  : isLive
+                  ? `LIVE QUEUE (Server Connected · ${pendingList.length} Pending)`
+                  : 'LIVE QUEUE (Queue Empty / Standby)'}
+              </span>
+            </div>
+
+            <button
+              onClick={() => setShowReferenceFixtures(!showReferenceFixtures)}
+              className="text-[11px] font-mono text-[#a59ecd] hover:text-white transition-colors underline decoration-dotted underline-offset-4"
             >
-              <span className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-[#4ade80]' : 'bg-[#c084fc]'}`} />
-              {isLive ? 'LIVE QUEUE (Server Connected)' : 'DEMO MODE (Offline Dataset)'}
-            </span>
+              {showReferenceFixtures
+                ? '← Return to Live Reviews'
+                : 'Preview Reference Review Fixtures (v1.0)'}
+            </button>
           </div>
+
+          {/* API Error Notification */}
+          {apiError && !showReferenceFixtures && (
+            <div className="mb-3.5 p-3 rounded-lg bg-[#3b1219] border border-[#f87171]/40 text-[#fca5a5] text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-[#f87171]">API Warning:</span>
+                <span>{apiError}</span>
+              </div>
+              <button
+                onClick={handleRefresh}
+                className="px-2.5 py-1 bg-[#ef4444] text-white rounded text-[11px] font-semibold hover:bg-[#dc2626] transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* Reference Fixtures Warning Banner */}
+          {showReferenceFixtures && (
+            <div className="mb-3.5 p-2.5 rounded-lg bg-[#271d4d] border border-[#5d3bbb] text-[#dcd7f2] text-xs flex items-center justify-between">
+              <span className="font-mono">
+                📌 <strong>Previewing offline review fixtures.</strong> These records are test data for design verification and do not represent active customer requests.
+              </span>
+              <button
+                onClick={() => setShowReferenceFixtures(false)}
+                className="px-2 py-0.5 bg-[#4c2fa8] hover:bg-[#5e38d1] text-white rounded text-[10.5px] font-mono ml-2 flex-shrink-0"
+              >
+                Exit Preview
+              </button>
+            </div>
+          )}
 
           {/* 1. REVIEW PAGE HEADER */}
           <ReviewPageHeader
@@ -365,10 +430,10 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
 
           {/* 2. KPI CARDS */}
           <ReviewKpiSection
-            pendingCount={pendingList.length}
-            approvedCount={approvedList.length + approvedCountOffset}
-            deniedCount={deniedList.length + deniedCountOffset}
-            expiredCount={expiredList.length + expiredCountOffset}
+            pendingCount={effectivePending.length}
+            approvedCount={effectiveApproved.length}
+            deniedCount={effectiveDenied.length}
+            expiredCount={effectiveExpired.length}
           />
 
           {/* 3. STATUS TABS */}
@@ -378,11 +443,21 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
               setCurrentStatus(status);
               if (selectedRequest) handleCloseDetails();
             }}
-            pendingCount={pendingList.length}
-            approvedCount={approvedList.length + approvedCountOffset}
-            deniedCount={deniedList.length + deniedCountOffset}
-            expiredCount={expiredList.length + expiredCountOffset}
+            pendingCount={effectivePending.length}
+            approvedCount={effectiveApproved.length}
+            deniedCount={effectiveDenied.length}
+            expiredCount={effectiveExpired.length}
           />
+
+          {/* Historical Status Clarification Notice */}
+          {currentStatus !== 'Pending' && !showReferenceFixtures && (
+            <div className="mb-3 px-3.5 py-2 rounded-lg bg-[#181635] border border-[#2e2957] text-[#9c96c9] text-xs flex items-center gap-2">
+              <span className="text-[#38bdf8] font-mono">ℹ</span>
+              <span>
+                Historical <strong>{currentStatus.toLowerCase()}</strong> records are permanently archived in the <strong>Audit Log</strong>. Actions approved or denied during your active session are tracked above.
+              </span>
+            </div>
+          )}
 
           {/* 4. FILTER TOOLBAR */}
           <ReviewToolbar
@@ -391,12 +466,32 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
             onResetFilters={handleResetFilters}
           />
 
-          {/* 5. REQUESTS TABLE */}
-          <ReviewTable
-            requests={filteredRequests}
-            selectedRequest={selectedRequest}
-            onSelectRequest={handleSelectRequest}
-          />
+          {/* 5. REQUESTS TABLE OR EMPTY STATE */}
+          {isLoading && !showReferenceFixtures ? (
+            <div className="relative p-12 bg-[#16142e] pixel-corners border border-[#3a3273] text-center">
+              <div className="text-xs font-mono text-[#a59ecd] animate-pulse">
+                Fetching review queue from server...
+              </div>
+            </div>
+          ) : currentStatus === 'Pending' && effectivePending.length === 0 && !filters.searchQuery.trim() && filters.agent === 'All' && filters.tool === 'All' && filters.riskRange === 'All' ? (
+            <div className="relative p-10 bg-[#16142e] pixel-corners border border-[#3a3273] text-center shadow-[0_4px_24px_rgba(0,0,0,0.45)]">
+              <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-[#1b173b] border border-[#3a3273] flex items-center justify-center text-xl">
+                🛡️
+              </div>
+              <h3 className="text-sm font-bold text-white font-mono uppercase tracking-wide">
+                No Pending Reviews
+              </h3>
+              <p className="text-xs text-[#9c96c9] max-w-md mx-auto mt-1.5 leading-relaxed">
+                Actions flagged with policy-designated high risk or supervisor requirements will automatically appear in this queue for human authorization.
+              </p>
+            </div>
+          ) : (
+            <ReviewTable
+              requests={filteredRequests}
+              selectedRequest={selectedRequest}
+              onSelectRequest={handleSelectRequest}
+            />
+          )}
         </div>
 
         {/* RIGHT WORKSPACE: ANIMATED REVIEW PORTAL */}

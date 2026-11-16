@@ -38,7 +38,7 @@ export function App() {
       if (hash === 'policies') return 'Policies';
       if (hash === 'benchmarks') return 'Benchmarks';
     }
-    return 'Benchmarks'; // Default to Benchmarks tab for the Benchmarks screen build
+    return 'Overview'; // Default to Overview tab
   };
 
   const [currentTab, setCurrentTab] = useState(getInitialTab);
@@ -46,12 +46,15 @@ export function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   // Live dashboard state
   const [overviewStats, setOverviewStats] = useState<ApiOverviewStats | null>(null);
   const [liveEvents, setLiveEvents] = useState<SecurityEvent[] | null>(null);
   const [liveAgents, setLiveAgents] = useState<Agent[] | null>(null);
   const [activityData, setActivityData] = useState<DayData[] | null>(null);
+  const [riskCounts, setRiskCounts] = useState<{ critical: number; high: number; medium: number; low: number } | null>(null);
 
   const handleSelectTab = (tab: string) => {
     setCurrentTab(tab);
@@ -98,19 +101,30 @@ export function App() {
   };
 
   const fetchDashboardData = useCallback(async () => {
+    setIsLoading(true);
+    setApiError(null);
     try {
-      const [statsRes, eventsRes, agentsRes] = await Promise.allSettled([
+      const [statsRes, eventsRes, agentsRes, policiesRes] = await Promise.allSettled([
         apiClient.getOverview(),
-        apiClient.getEvents({ limit: 20 }),
+        apiClient.getEvents({ limit: 100 }),
         apiClient.getAgents(),
+        apiClient.getPolicies(),
       ]);
+
+      let anySuccess = false;
 
       if (statsRes.status === 'fulfilled' && statsRes.value) {
         setOverviewStats(statsRes.value);
+        anySuccess = true;
       }
 
-      if (eventsRes.status === 'fulfilled' && eventsRes.value?.events) {
-        const rawEvents = eventsRes.value.events;
+      const rawEvents: ApiEventItem[] =
+        eventsRes.status === 'fulfilled' && eventsRes.value?.events
+          ? eventsRes.value.events
+          : [];
+
+      if (eventsRes.status === 'fulfilled') {
+        anySuccess = true;
         const mapped: SecurityEvent[] = rawEvents.slice(0, 4).map((e) => {
           const dec: DecisionType =
             e.decision === 'ALLOW' ? 'Allowed' : e.decision === 'REVIEW' ? 'Review' : 'Blocked';
@@ -125,76 +139,98 @@ export function App() {
             reason: e.reasons?.[0] || 'Enforced by runtime security policy.',
           };
         });
-        if (mapped.length > 0) {
-          setLiveEvents(mapped);
-          const derived = computeActivityFromEvents(rawEvents);
-          if (derived && derived.some((d) => d.allowed > 0 || d.review > 0 || d.blocked > 0)) {
-            setActivityData(derived);
-          }
-        }
+        setLiveEvents(mapped);
+
+        const derived = computeActivityFromEvents(rawEvents);
+        setActivityData(derived);
+
+        const critical = rawEvents.filter((e) => (e.risk_score || 0) >= 81).length;
+        const high = rawEvents.filter((e) => (e.risk_score || 0) >= 61 && (e.risk_score || 0) <= 80).length;
+        const medium = rawEvents.filter((e) => (e.risk_score || 0) >= 31 && (e.risk_score || 0) <= 60).length;
+        const low = rawEvents.filter((e) => (e.risk_score || 0) <= 30).length;
+        setRiskCounts({ critical, high, medium, low });
       }
 
-      if (agentsRes.status === 'fulfilled' && agentsRes.value?.paused_agents) {
-        const paused = agentsRes.value.paused_agents;
-        setLiveAgents((prev) => {
-          const base = prev || [
-            {
-              id: 'research-agent',
-              name: 'research-agent',
-              status: 'Active',
-              policy: 'Research v2',
-              events7d: 1248,
-              blockedCount: 142,
-              blockedRate: '11.4%',
-              runtime: 'Python LangChain v0.2',
-              lastActive: 'Just now',
-              description: 'Web crawler and market intelligence gathering autonomous agent.',
-            },
-            {
-              id: 'ops-agent',
-              name: 'ops-agent',
-              status: 'Active',
-              policy: 'Operations v1',
-              events7d: 973,
-              blockedCount: 118,
-              blockedRate: '12.1%',
-              runtime: 'Go Agent Daemon v1.4',
-              lastActive: '2m ago',
-              description: 'Infrastructure automation and server health diagnostics.',
-            },
-            {
-              id: 'data-agent',
-              name: 'data-agent',
-              status: 'Active',
-              policy: 'Data Access v3',
-              events7d: 840,
-              blockedCount: 116,
-              blockedRate: '13.8%',
-              runtime: 'Node.js Agent SDK v3.1',
-              lastActive: '8m ago',
-              description: 'Internal analytical data query agent with read-only sandbox.',
-            },
-            {
-              id: 'email-agent',
-              name: 'email-agent',
-              status: 'Paused',
-              policy: 'Restricted v1',
-              events7d: 421,
-              blockedCount: 53,
-              blockedRate: '12.6%',
-              runtime: 'Python Autogen v0.4',
-              lastActive: '34m ago',
-              description: 'Outbound dispatch agent paused due to high risk score anomaly.',
-            },
-          ];
-          return base.map((ag) => ({
-            ...ag,
-            status: paused.includes(ag.name) ? 'Paused' : 'Active',
-          }));
+      const paused =
+        agentsRes.status === 'fulfilled' && agentsRes.value?.paused_agents
+          ? agentsRes.value.paused_agents
+          : [];
+
+      if (agentsRes.status === 'fulfilled') {
+        anySuccess = true;
+      }
+
+      const agentMap = new Map<string, { total: number; blocked: number; lastTime: string; policy: string }>();
+      rawEvents.forEach((e) => {
+        if (!e.agent) return;
+        const cur = agentMap.get(e.agent) || {
+          total: 0,
+          blocked: 0,
+          lastTime: e.timestamp,
+          policy: e.policy_version_hash ? `Policy (${e.policy_version_hash.slice(0, 7)})` : 'Enforced Policy',
+        };
+        cur.total += 1;
+        if (e.decision === 'BLOCK') cur.blocked += 1;
+        agentMap.set(e.agent, cur);
+      });
+
+      if (policiesRes.status === 'fulfilled' && policiesRes.value?.agents) {
+        anySuccess = true;
+        policiesRes.value.agents.forEach((a) => {
+          if (!agentMap.has(a.name)) {
+            agentMap.set(a.name, {
+              total: 0,
+              blocked: 0,
+              lastTime: '',
+              policy: 'Assigned Policy',
+            });
+          }
         });
       }
+
+      const serverDiscovered =
+        agentsRes.status === 'fulfilled' && Array.isArray(agentsRes.value?.agents)
+          ? agentsRes.value.agents
+          : null;
+
+      let discoveredAgents: Agent[] = [];
+      if (serverDiscovered && serverDiscovered.length > 0) {
+        discoveredAgents = serverDiscovered.map((a) => ({
+          id: a.name,
+          name: a.name,
+          status: a.is_paused ? 'Paused' : 'Active',
+          policy: 'Enforced Policy',
+          events7d: a.total_events,
+          blockedCount: a.blocked_count,
+          blockedRate: a.total_events > 0 ? `${((a.blocked_count / a.total_events) * 100).toFixed(1)}%` : '0.0%',
+          runtime: 'Agent Runtime',
+          lastActive: a.last_active ? new Date(a.last_active).toLocaleTimeString() : 'No recent activity',
+          description: `Autonomous agent '${a.name}' under AgentShield runtime protection.`,
+        }));
+      } else {
+        discoveredAgents = Array.from(agentMap.entries()).map(([name, data]) => ({
+          id: name,
+          name,
+          status: paused.includes(name) ? 'Paused' : 'Active',
+          policy: data.policy,
+          events7d: data.total,
+          blockedCount: data.blocked,
+          blockedRate: data.total > 0 ? `${((data.blocked / data.total) * 100).toFixed(1)}%` : '0.0%',
+          runtime: 'Agent Runtime',
+          lastActive: data.lastTime ? new Date(data.lastTime).toLocaleTimeString() : 'No recent activity',
+          description: `Autonomous agent '${name}' under AgentShield runtime protection.`,
+        }));
+      }
+
+      setLiveAgents(discoveredAgents);
+
+      if (!anySuccess) {
+        setApiError('Unable to connect to AgentShield API. Check server status.');
+      }
     } catch {
-      // Offline fallback preserved
+      setApiError('Unable to connect to AgentShield API. Check server status.');
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
@@ -305,6 +341,22 @@ export function App() {
               isRefreshing={isRefreshing}
             />
 
+            {/* API Error Notification */}
+            {apiError && (
+              <div className="p-3 bg-[#4a1c25]/50 border border-[#782836] rounded-lg text-xs flex items-center justify-between shadow-sm">
+                <span className="text-[#f87171] font-mono flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-[#f87171] animate-pulse" />
+                  {apiError}
+                </span>
+                <button
+                  onClick={handleRefresh}
+                  className="px-2.5 py-1 bg-[#4a1c25] hover:bg-[#5e232e] text-[#f87171] hover:text-white border border-[#782836] rounded text-[11px] font-semibold transition-colors cursor-pointer"
+                >
+                  Retry Connection
+                </button>
+              </div>
+            )}
+
             {/* KPI Section: 4 Metric Cards with Sparklines */}
             <KpiSection
               stats={
@@ -317,6 +369,7 @@ export function App() {
                     }
                   : null
               }
+              isLoading={isLoading}
             />
 
             {/* Middle Analytics Grid: 3 Panels */}
@@ -338,7 +391,7 @@ export function App() {
                 />
               </div>
               <div className="lg:col-span-3 xl:col-span-3 flex flex-col">
-                <RiskOverview />
+                <RiskOverview counts={riskCounts} />
               </div>
             </div>
 
@@ -346,17 +399,22 @@ export function App() {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
               <div className="lg:col-span-6 xl:col-span-6 flex flex-col">
                 <ActiveAgentsTable
-                  agents={liveAgents || undefined}
+                  agents={liveAgents || []}
                   onSelectAgent={setSelectedAgent}
                   onViewAll={() => setIsSearchOpen(true)}
                 />
               </div>
               <div className="lg:col-span-3 xl:col-span-3 flex flex-col">
-                <AttentionRequired onSelectItem={handleAttentionSelect} />
+                <AttentionRequired
+                  onSelectItem={handleAttentionSelect}
+                  pendingReviewsCount={overviewStats?.pending_reviews_count ?? 0}
+                  pausedAgents={overviewStats?.paused_agents ?? []}
+                  highRiskCount={riskCounts ? riskCounts.critical + riskCounts.high : 0}
+                />
               </div>
               <div className="lg:col-span-3 xl:col-span-3 flex flex-col">
                 <RecentEventsList
-                  events={liveEvents || undefined}
+                  events={liveEvents || []}
                   onSelectEvent={setSelectedEvent}
                   onViewAll={() => setIsSearchOpen(true)}
                 />

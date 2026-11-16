@@ -65,8 +65,15 @@ export const ViewAllRunsModal: React.FC<ViewAllRunsModalProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#231e47]">
-                {runs.map((run) => {
-                  const isSelected = run.id === selectedRunId;
+                {runs.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="py-8 text-center text-xs font-mono text-[#8e87be]">
+                      No benchmark runs recorded in history
+                    </td>
+                  </tr>
+                ) : (
+                  runs.map((run) => {
+                    const isSelected = run.id === selectedRunId;
 
                   return (
                     <tr
@@ -113,7 +120,8 @@ export const ViewAllRunsModal: React.FC<ViewAllRunsModalProps> = ({
                       </td>
                     </tr>
                   );
-                })}
+                })
+              )}
               </tbody>
             </table>
           </div>

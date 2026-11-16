@@ -5,6 +5,7 @@ import {
   PixelPauseBarsIcon,
   PixelCrossShieldIcon,
   PixelSlidersIcon,
+  PixelCheckCircleIcon,
 } from './pixel/PixelIcons';
 import { PixelCard } from './pixel/PixelCard';
 import { AnimatedNumber } from './pixel/AnimatedNumber';
@@ -13,43 +14,51 @@ import type { AttentionItem } from '../types';
 
 interface AttentionRequiredProps {
   onSelectItem: (item: AttentionItem) => void;
+  pendingReviewsCount?: number;
+  pausedAgents?: string[];
+  highRiskCount?: number;
 }
 
-export const AttentionRequired: React.FC<AttentionRequiredProps> = ({ onSelectItem }) => {
-  const items: AttentionItem[] = [
-    {
+export const AttentionRequired: React.FC<AttentionRequiredProps> = ({
+  onSelectItem,
+  pendingReviewsCount = 0,
+  pausedAgents = [],
+  highRiskCount = 0,
+}) => {
+  const items: AttentionItem[] = [];
+
+  if (pendingReviewsCount > 0) {
+    items.push({
       id: 'review-actions',
       iconType: 'review',
-      text: '6 actions awaiting review',
-      count: 6,
+      text: `${pendingReviewsCount} action${pendingReviewsCount === 1 ? '' : 's'} awaiting review`,
+      count: pendingReviewsCount,
       severity: 'yellow',
-      details: 'Supervisory sign-off required for file system write permissions across ops-agent.',
-    },
-    {
+      details: 'Human supervisor sign-off required for held tool execution proposals.',
+    });
+  }
+
+  if (pausedAgents.length > 0) {
+    items.push({
       id: 'paused-agent',
       iconType: 'paused',
-      text: '1 agent is paused',
-      count: 1,
+      text: `${pausedAgents.length} agent${pausedAgents.length === 1 ? ' is' : 's are'} paused`,
+      count: pausedAgents.length,
       severity: 'orange',
-      details: 'email-agent auto-paused following anomalous credential spray detection.',
-    },
-    {
+      details: `Containment policy active for: ${pausedAgents.join(', ')}.`,
+    });
+  }
+
+  if (highRiskCount > 0) {
+    items.push({
       id: 'high-risk',
       iconType: 'risk',
-      text: '17 high-risk events (≥ 61)',
-      count: 17,
+      text: `${highRiskCount} high-risk action${highRiskCount === 1 ? '' : 's'} (≥ 61)`,
+      count: highRiskCount,
       severity: 'red',
-      details: '17 events flagged with elevated heuristic risk in the last evaluation cycle.',
-    },
-    {
-      id: 'policy-changes',
-      iconType: 'policy',
-      text: '2 policy changes in last 24h',
-      count: 2,
-      severity: 'purple',
-      details: 'Updated Research v2 sandbox definitions and restricted outbound ports.',
-    },
-  ];
+      details: `${highRiskCount} action${highRiskCount === 1 ? '' : 's'} evaluated with elevated risk scores.`,
+    });
+  }
 
   const getIcon = (type: AttentionItem['iconType']) => {
     switch (type) {
@@ -94,15 +103,32 @@ export const AttentionRequired: React.FC<AttentionRequiredProps> = ({ onSelectIt
           </h3>
         </div>
 
-        {/* Purple Badge 6 */}
-        <span className="px-1.5 py-0.5 text-[10.5px] font-bold rounded-md bg-[#6d3ee8] text-white shadow-[0_1px_4px_rgba(109,62,232,0.4)]">
-          <AnimatedNumber value={6} />
+        {/* Badge */}
+        <span
+          className={`px-1.5 py-0.5 text-[10.5px] font-bold rounded-md ${
+            items.length > 0
+              ? 'bg-[#6d3ee8] text-white shadow-[0_1px_4px_rgba(109,62,232,0.4)]'
+              : 'bg-[#153e28] text-[#4ade80] border border-[#226742]'
+          }`}
+        >
+          <AnimatedNumber value={items.length} />
         </span>
       </div>
 
-      {/* Rows */}
+      {/* Rows or Clean Empty State */}
       <div className="flex flex-col justify-between gap-1.5 my-auto py-1">
-        {items.map((item) => (
+        {items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-6 text-center">
+            <div className="w-8 h-8 rounded-full bg-[#153e28] text-[#4ade80] flex items-center justify-center mb-2 shadow-xs">
+              <PixelCheckCircleIcon size={18} />
+            </div>
+            <span className="text-[13px] font-semibold text-white">All Systems Normal</span>
+            <span className="text-[11px] text-[#847ea8] mt-1 max-w-[220px]">
+              No active reviews pending and no contained agents.
+            </span>
+          </div>
+        ) : (
+          items.map((item) => (
           <button
             key={item.id}
             onClick={() => onSelectItem(item)}
@@ -122,7 +148,8 @@ export const AttentionRequired: React.FC<AttentionRequiredProps> = ({ onSelectIt
               className="text-[#7d77a8] group-hover:text-white group-hover:translate-x-0.5 transition-all"
             />
           </button>
-        ))}
+        ))
+      )}
       </div>
     </PixelCard>
   );

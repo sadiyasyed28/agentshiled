@@ -15,13 +15,10 @@ import type {
   ApiPolicyRuleItem,
   ApiRiskFactorItem,
   ApiRuntimeConfigResponse,
+  ApiKeyItem,
+  ApiDiscoveredAgent,
+  ApiTelemetryStatusResponse,
 } from "./api/client";
-import {
-  DEMO_STATS,
-  DEMO_SECURITY_EVENTS,
-  DEMO_POLICIES,
-  DEMO_RISK_FACTORS,
-} from "./mock/events";
 
 const PIPELINE_STOPS: PathStop[] = [
   { id: 1, label: "Propose", description: "Agent proposes tool action" },
@@ -33,7 +30,7 @@ const PIPELINE_STOPS: PathStop[] = [
   { id: 7, label: "Audit", description: "Separate decision vs execution logging" },
 ];
 
-type WindowStream = "events" | "reviews" | "incidents" | "audit" | "simulation" | "settings";
+type WindowStream = "events" | "reviews" | "incidents" | "audit" | "simulation" | "settings" | "connect";
 
 const FALLBACK_SCENARIOS: ApiSimulationScenario[] = [
   {
@@ -180,6 +177,33 @@ export const App: React.FC = () => {
   const [apiRiskFactors, setApiRiskFactors] = useState<ApiRiskFactorItem[] | null>(null);
   const [runtimeConfig, setRuntimeConfig] = useState<ApiRuntimeConfigResponse | null>(null);
 
+  // Workspace Agents & Telemetry State
+  const [discoveredAgents, setDiscoveredAgents] = useState<ApiDiscoveredAgent[]>([]);
+  const [telemetryStatus, setTelemetryStatus] = useState<ApiTelemetryStatusResponse | null>(null);
+
+  // API Keys & Customer Onboarding State
+  const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([]);
+  const [currentTenantId, setCurrentTenantId] = useState<string>("default");
+  const [newlyCreatedKey, setNewlyCreatedKey] = useState<{ key: string; name: string } | null>(null);
+  const [copiedKey, setCopiedKey] = useState<boolean>(false);
+  const [authMode, setAuthMode] = useState<"key" | "email" | "register">("key");
+  const [loginEmail, setLoginEmail] = useState<string>("");
+  const [loginPassword, setLoginPassword] = useState<string>("");
+  const [regName, setRegName] = useState<string>("");
+  const [regEmail, setRegEmail] = useState<string>("");
+  const [regPassword, setRegPassword] = useState<string>("");
+  const [newKeyName, setNewKeyName] = useState<string>("");
+  const [showKeyGenerator, setShowKeyGenerator] = useState<boolean>(false);
+
+  const fetchApiKeys = useCallback(async () => {
+    try {
+      const res = await api.getApiKeys();
+      setApiKeys(res.keys || []);
+    } catch {
+      // Keys only accessible when authenticated
+    }
+  }, []);
+
   // Poll server state
   const fetchData = useCallback(async () => {
     try {
@@ -194,6 +218,12 @@ export const App: React.FC = () => {
 
       if (sessionRes.status === "fulfilled") {
         setIsAdminAuthenticated(sessionRes.value.authenticated);
+        if (sessionRes.value.tenant_id) {
+          setCurrentTenantId(sessionRes.value.tenant_id);
+        }
+        if (sessionRes.value.authenticated) {
+          fetchApiKeys();
+        }
       }
       if (overviewRes.status === "fulfilled") {
         setApiOverview(overviewRes.value);
@@ -216,6 +246,27 @@ export const App: React.FC = () => {
         setIncidents(incs.incidents || []);
       } catch {
         // incident endpoint fallback
+      }
+
+      // Fetch discovered agents and real-time telemetry status
+      try {
+        const [agentsRes, telemRes] = await Promise.allSettled([
+          api.getDiscoveredAgents(),
+          api.getTelemetryStatus(),
+        ]);
+        if (agentsRes.status === "fulfilled") {
+          setDiscoveredAgents(agentsRes.value.agents || []);
+        } else {
+          setDiscoveredAgents([]);
+        }
+        if (telemRes.status === "fulfilled") {
+          setTelemetryStatus(telemRes.value);
+        } else {
+          setTelemetryStatus(null);
+        }
+      } catch {
+        setDiscoveredAgents([]);
+        setTelemetryStatus(null);
       }
 
       // Policies & Risk Factors fetches (authenticated admin endpoints)
@@ -279,24 +330,61 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  // Handle Admin Sign In
+  // Handle Sign In (Key or Email)
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!adminKeyInput.trim()) return;
     setIsSubmitting(true);
     setAdminAuthError(null);
     try {
-      const res = await api.login(adminKeyInput.trim());
+      let res;
+      if (authMode === "email") {
+        if (!loginEmail.trim() || !loginPassword) return;
+        res = await api.login(undefined, loginEmail.trim(), loginPassword);
+      } else {
+        if (!adminKeyInput.trim()) return;
+        res = await api.login(adminKeyInput.trim());
+      }
       if (res.authenticated) {
         setIsAdminAuthenticated(true);
+        if (res.tenant_id) setCurrentTenantId(res.tenant_id);
         setShowAdminLogin(false);
         setAdminKeyInput("");
+        setLoginEmail("");
+        setLoginPassword("");
         fetchData();
+        fetchApiKeys();
       } else {
         setAdminAuthError("Authentication rejected: invalid credentials");
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Sign in failed";
+      setAdminAuthError(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Handle Self-Service Developer Registration
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!regName.trim() || !regEmail.trim() || !regPassword) return;
+    setIsSubmitting(true);
+    setAdminAuthError(null);
+    try {
+      const res = await api.register(regName.trim(), regEmail.trim(), regPassword);
+      setIsAdminAuthenticated(true);
+      setCurrentTenantId(res.tenant_id);
+      setNewlyCreatedKey({ key: res.api_key, name: "Default SDK Key" });
+      setShowAdminLogin(false);
+      setActiveStream("connect");
+      setRegName("");
+      setRegEmail("");
+      setRegPassword("");
+      setActionMessage(`Workspace '${res.name}' created! Save your API key.`);
+      fetchData();
+      fetchApiKeys();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Registration failed";
       setAdminAuthError(msg);
     } finally {
       setIsSubmitting(false);
@@ -309,10 +397,71 @@ export const App: React.FC = () => {
       await api.logout();
     } finally {
       setIsAdminAuthenticated(false);
+      setCurrentTenantId("default");
+      setApiKeys([]);
+      setNewlyCreatedKey(null);
       setApiPolicies(null);
       setApiRiskFactors(null);
       setRuntimeConfig(null);
+      setApiEvents([]);
+      setPendingReviews([]);
+      setIncidents([]);
+      setSimHistory([]);
+      setApiOverview(null);
+      setDiscoveredAgents([]);
+      setTelemetryStatus(null);
       fetchData();
+    }
+  };
+
+  // Handle API Key Management
+  const handleCreateNewKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newKeyName.trim() || "SDK Key";
+    setIsSubmitting(true);
+    try {
+      const res = await api.createApiKey(name);
+      setNewlyCreatedKey({ key: res.api_key, name: res.name });
+      setNewKeyName("");
+      setShowKeyGenerator(false);
+      setActionMessage(`New key '${res.name}' created! Save your secret key.`);
+      fetchApiKeys();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to create key";
+      setActionMessage(msg);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRevokeKey = async (keyId: string) => {
+    try {
+      await api.revokeApiKey(keyId);
+      setActionMessage("API key revoked");
+      fetchApiKeys();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to revoke key";
+      setActionMessage(msg);
+    }
+  };
+
+  const handleRotateKey = async (keyId: string) => {
+    try {
+      const res = await api.rotateApiKey(keyId);
+      setNewlyCreatedKey({ key: res.api_key, name: res.name });
+      setActionMessage("Key rotated! Save the new secret key.");
+      fetchApiKeys();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to rotate key";
+      setActionMessage(msg);
+    }
+  };
+
+  const handleCopyKey = (key: string) => {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(key);
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2500);
     }
   };
 
@@ -434,7 +583,7 @@ export const App: React.FC = () => {
   const activeScenarioList = scenarios.length > 0 ? scenarios : FALLBACK_SCENARIOS;
   const currentScenario = activeScenarioList.find((s) => s.id === selectedScenarioId) || activeScenarioList[0];
 
-  // Compute stats: live if online, mock if offline
+  // Compute stats: live if online, zero if offline
   const stats = isApiOnline
     ? {
         allow: apiOverview?.allow ?? apiEvents.filter((e) => e.decision === "ALLOW").length,
@@ -445,24 +594,22 @@ export const App: React.FC = () => {
         isLive: true,
       }
     : {
-        allow: DEMO_STATS.allowCount,
-        review: DEMO_STATS.reviewCount,
-        block: DEMO_STATS.blockCount,
-        total: DEMO_STATS.totalEvaluated,
+        allow: 0,
+        review: 0,
+        block: 0,
+        total: 0,
         paused: 0,
         isLive: false,
       };
 
-  // Filtered live or demo events
-  const displayedEvents = isApiOnline
-    ? (activeTab === "all" ? apiEvents : apiEvents.filter((e) => e.decision === activeTab))
-    : (activeTab === "all" ? DEMO_SECURITY_EVENTS : DEMO_SECURITY_EVENTS.filter((e) => e.decision === activeTab));
+  // Filtered live events (strictly honest data: no fake production fallbacks)
+  const displayedEvents = activeTab === "all" ? apiEvents : apiEvents.filter((e) => e.decision === activeTab);
 
   const isPoliciesLive = Boolean(isApiOnline && apiPolicies && apiPolicies.length > 0);
-  const displayedPolicies = isPoliciesLive && apiPolicies ? apiPolicies : DEMO_POLICIES;
+  const displayedPolicies = (isPoliciesLive && apiPolicies) ? apiPolicies : [];
 
   const isRiskLive = Boolean(isApiOnline && apiRiskFactors && apiRiskFactors.length > 0);
-  const displayedRiskFactors = isRiskLive && apiRiskFactors ? apiRiskFactors : DEMO_RISK_FACTORS;
+  const displayedRiskFactors = (isRiskLive && apiRiskFactors) ? apiRiskFactors : [];
 
   const selectedStop = PIPELINE_STOPS[selectedStopIndex];
 
@@ -498,10 +645,13 @@ export const App: React.FC = () => {
               </span>
             )}
 
-            {/* Admin Session Control */}
+            {/* Admin & Workspace Session Control */}
             {isApiOnline && (
               isAdminAuthenticated ? (
                 <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-mono text-[#3ddc97] bg-[#17150d] px-1.5 py-0.5 border border-[#3ddc97]/40">
+                    WORKSPACE: {currentTenantId}
+                  </span>
                   <span className="text-[10px] font-mono text-[#3ddc97] bg-[#17150d] px-1.5 py-0.5 border border-[#3ddc97]/40">
                     ADMIN ACTIVE
                   </span>
@@ -515,38 +665,150 @@ export const App: React.FC = () => {
               ) : (
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setShowAdminLogin(!showAdminLogin)}
+                    onClick={() => {
+                      setShowAdminLogin(!showAdminLogin);
+                      setAuthMode("key");
+                    }}
                     className="text-[10px] font-mono text-[#f3b82b] bg-[#17150d] px-1.5 py-0.5 border border-[#f3b82b]/40 hover:bg-[#f3b82b]/10 cursor-pointer"
                   >
-                    {showAdminLogin ? "[cancel auth]" : "[admin sign in]"}
+                    {showAdminLogin && authMode !== "register" ? "[cancel]" : "[admin sign in]"}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAdminLogin(true);
+                      setAuthMode("register");
+                    }}
+                    className="text-[10px] font-mono text-[#3ddc97] bg-[#17150d] px-1.5 py-0.5 border border-[#3ddc97]/40 hover:bg-[#3ddc97]/10 cursor-pointer"
+                  >
+                    [create workspace]
                   </button>
                 </div>
               )
             )}
           </div>
 
-          {/* Admin Login Form - Text on Grid */}
+          {/* Admin & Customer Onboarding Form - Text on Grid */}
           {showAdminLogin && !isAdminAuthenticated && (
-            <form onSubmit={handleAdminLogin} className="mt-3 flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-mono text-[#ff8fb1]">KEY:</span>
-              <input
-                type="password"
-                value={adminKeyInput}
-                onChange={(e) => setAdminKeyInput(e.target.value)}
-                placeholder="Enter AGENTSHIELD_ADMIN_KEY..."
-                className="bg-[#17150d] border border-[#ff8fb1]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none focus:border-[#ff8fb1]"
-              />
-              <button
-                type="submit"
-                disabled={isSubmitting}
-                className="text-xs font-mono bg-[#ff8fb1] text-[#17150d] px-2 py-1 font-bold cursor-pointer hover:bg-[#ff8fb1]/80"
-              >
-                {isSubmitting ? "AUTH..." : "AUTHENTICATE"}
-              </button>
-              {adminAuthError && (
-                <span className="text-[10px] font-mono text-[#ff8fb1]">{adminAuthError}</span>
+            <div className="mt-3 bg-[#17150d] p-3 border border-[#ff8fb1]/40 max-w-xl">
+              <div className="flex items-center gap-3 mb-2 text-xs font-['Archivo'] font-[900] italic">
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("key")}
+                  className={`cursor-pointer px-1.5 py-0.5 ${
+                    authMode === "key"
+                      ? "text-[#17150d] bg-[#f4ecd0]"
+                      : "text-[#f4ecd0]/60 hover:text-[#f4ecd0]"
+                  }`}
+                >
+                  API / ADMIN KEY
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("email")}
+                  className={`cursor-pointer px-1.5 py-0.5 ${
+                    authMode === "email"
+                      ? "text-[#17150d] bg-[#f3b82b]"
+                      : "text-[#f4ecd0]/60 hover:text-[#f4ecd0]"
+                  }`}
+                >
+                  EMAIL LOGIN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthMode("register")}
+                  className={`cursor-pointer px-1.5 py-0.5 ${
+                    authMode === "register"
+                      ? "text-[#17150d] bg-[#3ddc97]"
+                      : "text-[#f4ecd0]/60 hover:text-[#f4ecd0]"
+                  }`}
+                >
+                  REGISTER WORKSPACE
+                </button>
+              </div>
+
+              {authMode === "key" && (
+                <form onSubmit={handleAdminLogin} className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-mono text-[#ff8fb1]">KEY:</span>
+                  <input
+                    type="password"
+                    value={adminKeyInput}
+                    onChange={(e) => setAdminKeyInput(e.target.value)}
+                    placeholder="Enter AGENTSHIELD_ADMIN_KEY or ash_live_..."
+                    className="bg-[#0e0e0e] border border-[#ff8fb1]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none focus:border-[#ff8fb1] min-w-[220px]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="text-xs font-mono bg-[#ff8fb1] text-[#17150d] px-2 py-1 font-bold cursor-pointer hover:bg-[#ff8fb1]/80"
+                  >
+                    {isSubmitting ? "AUTH..." : "AUTHENTICATE"}
+                  </button>
+                </form>
               )}
-            </form>
+
+              {authMode === "email" && (
+                <form onSubmit={handleAdminLogin} className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="email"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    placeholder="Developer Email"
+                    className="bg-[#0e0e0e] border border-[#f3b82b]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none focus:border-[#f3b82b]"
+                  />
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Password"
+                    className="bg-[#0e0e0e] border border-[#f3b82b]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none focus:border-[#f3b82b]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="text-xs font-mono bg-[#f3b82b] text-[#17150d] px-2 py-1 font-bold cursor-pointer hover:bg-[#f3b82b]/80"
+                  >
+                    {isSubmitting ? "SIGNING IN..." : "SIGN IN"}
+                  </button>
+                </form>
+              )}
+
+              {authMode === "register" && (
+                <form onSubmit={handleRegister} className="flex items-center gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    value={regName}
+                    onChange={(e) => setRegName(e.target.value)}
+                    placeholder="Workspace Name"
+                    className="bg-[#0e0e0e] border border-[#3ddc97]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none focus:border-[#3ddc97]"
+                  />
+                  <input
+                    type="email"
+                    value={regEmail}
+                    onChange={(e) => setRegEmail(e.target.value)}
+                    placeholder="Email"
+                    className="bg-[#0e0e0e] border border-[#3ddc97]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none focus:border-[#3ddc97]"
+                  />
+                  <input
+                    type="password"
+                    value={regPassword}
+                    onChange={(e) => setRegPassword(e.target.value)}
+                    placeholder="Password (8+ chars)"
+                    className="bg-[#0e0e0e] border border-[#3ddc97]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none focus:border-[#3ddc97]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="text-xs font-mono bg-[#3ddc97] text-[#17150d] px-2 py-1 font-bold cursor-pointer hover:bg-[#3ddc97]/80"
+                  >
+                    {isSubmitting ? "CREATING..." : "CREATE WORKSPACE"}
+                  </button>
+                </form>
+              )}
+
+              {adminAuthError && (
+                <div className="mt-1 text-[10px] font-mono text-[#ff8fb1]">{adminAuthError}</div>
+              )}
+            </div>
           )}
 
           <p className="text-sm text-[#f4ecd0]/70 mt-1 max-w-xl font-['DM_Sans']">
@@ -951,6 +1213,19 @@ export const App: React.FC = () => {
                   >
                     SETTINGS
                   </button>
+                  <button
+                    onClick={() => {
+                      setActiveStream("connect");
+                      if (isAdminAuthenticated) fetchApiKeys();
+                    }}
+                    className={`cursor-pointer px-1.5 py-0.5 border ${
+                      activeStream === "connect"
+                        ? "text-[#17150d] bg-[#ff8fb1] border-[#ff8fb1]"
+                        : "text-[#f4ecd0]/60 border-transparent hover:text-[#f4ecd0]"
+                    }`}
+                  >
+                    CONNECT {apiKeys.length > 0 ? `(${apiKeys.length})` : ""}
+                  </button>
                 </div>
               </div>
 
@@ -1001,6 +1276,7 @@ export const App: React.FC = () => {
                   {activeStream === "audit" && "audit_integrity_chain.log"}
                   {activeStream === "simulation" && "simulation_runs.log"}
                   {activeStream === "settings" && "runtime_configuration.env"}
+                  {activeStream === "connect" && "agent_sdk_integration.py"}
                 </span>
                 <span>
                   {activeStream === "events" && (
@@ -1026,6 +1302,9 @@ export const App: React.FC = () => {
                   )}
                   {activeStream === "settings" && (
                     runtimeConfig ? (runtimeConfig.read_only ? "[read-only mode]" : "[active]") : (isAdminAuthenticated ? "loading..." : "[admin required]")
+                  )}
+                  {activeStream === "connect" && (
+                    isAdminAuthenticated ? `${apiKeys.length} keys [${currentTenantId}]` : "[connect agent]"
                   )}
                 </span>
               </div>
@@ -1431,6 +1710,291 @@ export const App: React.FC = () => {
                     </div>
                   </div>
                 )
+              )}
+
+              {/* STREAM 7: CONNECT YOUR AGENT & API KEY MANAGEMENT */}
+              {activeStream === "connect" && (
+                <div className="space-y-4">
+                  {/* Secret Key Alert when newly created or rotated */}
+                  {newlyCreatedKey && (
+                    <div className="p-2.5 bg-[#0e0e0e] border-2 border-[#f3b82b]">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="font-['Archivo'] font-[900] italic text-xs uppercase tracking-wider text-[#f3b82b]">
+                          SAVE YOUR SECRET API KEY (SHOWN ONCE)
+                        </span>
+                        <button
+                          onClick={() => setNewlyCreatedKey(null)}
+                          className="text-[#f4ecd0]/40 hover:text-[#f4ecd0] text-xs font-mono cursor-pointer"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-[#f4ecd0]/80 mb-2 font-['DM_Sans']">
+                        This key ({newlyCreatedKey.name}) will never be shown again and cannot be retrieved from storage.
+                      </p>
+                      <div className="flex items-center gap-2 bg-[#17150d] p-1.5 border border-[#3ddc97]/50 mb-2">
+                        <code className="text-[#3ddc97] font-mono text-[11px] break-all select-all flex-1">
+                          {newlyCreatedKey.key}
+                        </code>
+                        <button
+                          onClick={() => handleCopyKey(newlyCreatedKey.key)}
+                          className="px-2 py-0.5 bg-[#3ddc97] text-[#17150d] text-[10px] font-bold font-mono cursor-pointer hover:bg-[#3ddc97]/80 shrink-0"
+                        >
+                          {copiedKey ? "COPIED!" : "COPY"}
+                        </button>
+                      </div>
+                      <div className="text-right">
+                        <button
+                          onClick={() => setNewlyCreatedKey(null)}
+                          className="text-[10px] font-mono text-[#f3b82b] hover:underline cursor-pointer"
+                        >
+                          [I have safely stored this secret key]
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {!isAdminAuthenticated ? (
+                    <div className="py-6 text-center font-['DM_Sans'] space-y-3">
+                      <div className="text-sm font-['Archivo'] font-[900] italic text-[#ff8fb1] uppercase tracking-wider">
+                        SELF-SERVICE AGENT INTEGRATION
+                      </div>
+                      <p className="text-xs text-[#f4ecd0]/70 max-w-md mx-auto">
+                        Create a workspace or sign in to obtain your Python SDK API key and connect your agent to real-time security policy telemetry.
+                      </p>
+                      <div className="flex justify-center gap-3 pt-2">
+                        <button
+                          onClick={() => {
+                            setShowAdminLogin(true);
+                            setAuthMode("register");
+                          }}
+                          className="px-3 py-1 bg-[#3ddc97] text-[#17150d] text-xs font-bold font-mono cursor-pointer hover:bg-[#3ddc97]/80"
+                        >
+                          CREATE WORKSPACE
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowAdminLogin(true);
+                            setAuthMode("key");
+                          }}
+                          className="px-3 py-1 bg-[#17150d] border border-[#f4ecd0]/40 text-[#f4ecd0] text-xs font-mono cursor-pointer hover:bg-[#f4ecd0]/10"
+                        >
+                          SIGN IN
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Section: Live Telemetry Health & Connection Status */}
+                      <div className="p-3 bg-[#0e0e0e] border border-[#f4ecd0]/20 font-mono text-xs">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-['Archivo'] font-[900] italic text-xs uppercase tracking-wider text-[#3ddc97]">
+                            TELEMETRY STATUS
+                          </span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 border ${
+                              (telemetryStatus?.total_events ?? apiEvents.length) > 0
+                                ? "bg-[#3ddc97]/10 text-[#3ddc97] border-[#3ddc97]/40"
+                                : "bg-[#f3b82b]/10 text-[#f3b82b] border-[#f3b82b]/40"
+                            }`}
+                          >
+                            {(telemetryStatus?.total_events ?? apiEvents.length) > 0 ? "● CONNECTED [LIVE]" : "○ AWAITING TELEMETRY"}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] text-[#f4ecd0]/80">
+                          <div>
+                            <span className="text-[#f4ecd0]/40 block uppercase">Ingested Events</span>
+                            <span className="font-bold text-[#f4ecd0]">{telemetryStatus?.total_events ?? apiEvents.length}</span>
+                          </div>
+                          <div>
+                            <span className="text-[#f4ecd0]/40 block uppercase">Active Agents</span>
+                            <span className="font-bold text-[#f4ecd0]">{discoveredAgents.length}</span>
+                          </div>
+                          <div>
+                            <span className="text-[#f4ecd0]/40 block uppercase">Pending Delivery</span>
+                            <span className="font-bold text-[#f4ecd0]">{telemetryStatus?.pending_delivery ?? 0}</span>
+                          </div>
+                          <div>
+                            <span className="text-[#f4ecd0]/40 block uppercase">Dropped Events</span>
+                            <span className="font-bold text-[#f4ecd0]">{telemetryStatus?.dropped_events ?? 0}</span>
+                          </div>
+                        </div>
+                        {telemetryStatus?.last_successful_transmission && (
+                          <div className="mt-2 pt-2 border-t border-[#f4ecd0]/10 text-[9px] text-[#f4ecd0]/50">
+                            Last successful transmission: {new Date(telemetryStatus.last_successful_transmission).toLocaleString()}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Section: Discovered Agents in this Workspace */}
+                      <div>
+                        <div className="text-xs font-['Archivo'] font-[900] italic text-[#f3b82b] uppercase tracking-wider mb-2">
+                          DISCOVERED AGENTS ({discoveredAgents.length})
+                        </div>
+                        {discoveredAgents.length === 0 ? (
+                          <div className="p-3 bg-[#0e0e0e] border border-[#f4ecd0]/10 text-center font-['DM_Sans'] text-xs text-[#f4ecd0]/60">
+                            No agents detected yet for workspace <span className="font-mono text-[#f3b82b]">{currentTenantId}</span>. Run your agent with the Python SDK below to stream real security decisions.
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5 font-mono text-[11px]">
+                            {discoveredAgents.map((ag) => (
+                              <div
+                                key={ag.name}
+                                className="p-2 bg-[#0e0e0e] border border-[#f4ecd0]/20 flex items-center justify-between gap-2"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className={`h-2 w-2 rounded-full ${ag.is_paused ? "bg-[#ff8fb1]" : "bg-[#3ddc97]"}`}></span>
+                                  <span className="font-bold text-[#f4ecd0]">{ag.name}</span>
+                                  <span className="text-[10px] text-[#f4ecd0]/50">[{ag.status}]</span>
+                                </div>
+                                <div className="text-[10px] text-[#f4ecd0]/70 flex items-center gap-3">
+                                  <span>{ag.total_events} events</span>
+                                  <span className="text-[#ff8fb1]">{ag.blocked_count} blocked</span>
+                                  {ag.last_active && (
+                                    <span className="text-[#f4ecd0]/40">
+                                      {new Date(ag.last_active).toLocaleTimeString()}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Section: Connect Your Agent Instructions */}
+                      <div>
+                        <div className="text-xs font-['Archivo'] font-[900] italic text-[#ff8fb1] uppercase tracking-wider mb-2">
+                          CONNECT YOUR AGENT
+                        </div>
+                        <div className="space-y-2 text-[11px] font-mono">
+                          <div>
+                            <span className="text-[#f4ecd0]/60 block text-[10px] uppercase">1. Install Python SDK</span>
+                            <pre className="bg-[#0e0e0e] p-2 text-[#3ddc97] border-l-2 border-[#3ddc97] select-all">
+                              pip install agentshield
+                            </pre>
+                          </div>
+                          <div>
+                            <span className="text-[#f4ecd0]/60 block text-[10px] uppercase">2. Configure Environment</span>
+                            <pre className="bg-[#0e0e0e] p-2 text-[#f4ecd0] border-l-2 border-[#f3b82b] select-all leading-relaxed">
+{`export AGENTSHIELD_API_URL="${typeof window !== "undefined" ? window.location.origin : "http://localhost:8000"}"
+export AGENTSHIELD_API_KEY="ash_live_YOUR_KEY_HERE"`}
+                            </pre>
+                          </div>
+                          <div>
+                            <span className="text-[#f4ecd0]/60 block text-[10px] uppercase">3. Python Integration Code</span>
+                            <pre className="bg-[#0e0e0e] p-2 text-[#f4ecd0]/90 border-l-2 border-[#ff8fb1] select-all leading-relaxed overflow-x-auto text-[10px]">
+{`from agentshield import Shield
+from agentshield.telemetry import TelemetryConfig, TelemetryExporter
+
+# Explicit or environment-driven telemetry configuration
+telemetry = TelemetryExporter(
+    config=TelemetryConfig(
+        api_url="${typeof window !== "undefined" ? window.location.origin : "http://localhost:8000"}",
+        api_key="ash_live_YOUR_KEY_HERE",
+    )
+)
+
+shield = Shield(telemetry=telemetry)
+
+# Real authorization decisions & tool execution outcomes are streamed directly to this dashboard
+result = shield.execute(agent="researcher", tool="create_order", args={"product_id": "p1", "quantity": 1})`}
+                            </pre>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Section: API Key Management */}
+                      <div className="pt-2 border-t border-[#f4ecd0]/10">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-['Archivo'] font-[900] italic text-[#3ddc97] uppercase tracking-wider">
+                            WORKSPACE API KEYS ({apiKeys.length})
+                          </span>
+                          <button
+                            onClick={() => setShowKeyGenerator(!showKeyGenerator)}
+                            className="text-[10px] font-mono text-[#ff8fb1] hover:underline cursor-pointer"
+                          >
+                            {showKeyGenerator ? "[cancel]" : "[+ generate new key]"}
+                          </button>
+                        </div>
+
+                        {showKeyGenerator && (
+                          <form onSubmit={handleCreateNewKey} className="mb-3 p-2 bg-[#0e0e0e] border border-[#3ddc97]/40 flex gap-2 items-center flex-wrap">
+                            <input
+                              type="text"
+                              value={newKeyName}
+                              onChange={(e) => setNewKeyName(e.target.value)}
+                              placeholder="Key Name (e.g. Production Agent)"
+                              className="bg-[#17150d] border border-[#3ddc97]/50 text-xs font-mono text-[#f4ecd0] px-2 py-1 outline-none flex-1 min-w-[150px]"
+                            />
+                            <button
+                              type="submit"
+                              disabled={isSubmitting}
+                              className="text-xs font-mono bg-[#3ddc97] text-[#17150d] px-2.5 py-1 font-bold cursor-pointer hover:bg-[#3ddc97]/80"
+                            >
+                              {isSubmitting ? "GENERATING..." : "GENERATE"}
+                            </button>
+                          </form>
+                        )}
+
+                        {apiKeys.length === 0 ? (
+                          <div className="py-2 text-center text-[#f4ecd0]/40 font-['DM_Sans'] text-xs">
+                            No API keys generated for this workspace.
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {apiKeys.map((k) => (
+                              <div
+                                key={k.key_id}
+                                className={`p-2 bg-[#0e0e0e] flex items-center justify-between flex-wrap gap-2 border-l-2 ${
+                                  k.is_active ? "border-[#3ddc97]" : "border-[#ff8fb1]/40 opacity-60"
+                                }`}
+                              >
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-bold text-[#f4ecd0]">{k.name}</span>
+                                    <span className={`text-[9px] px-1 py-0.2 border ${
+                                      k.is_active
+                                        ? "text-[#3ddc97] border-[#3ddc97]/40"
+                                        : "text-[#ff8fb1] border-[#ff8fb1]/40"
+                                    }`}>
+                                      {k.is_active ? "ACTIVE" : "REVOKED"}
+                                    </span>
+                                  </div>
+                                  <div className="text-[10px] text-[#f4ecd0]/60 font-mono mt-0.5">
+                                    <span>{k.masked_key}</span>
+                                    <span className="ml-2">created: {new Date(k.created_at * 1000).toLocaleDateString()}</span>
+                                    {k.last_used_at && (
+                                      <span className="ml-2 text-[#3ddc97]">
+                                        used: {new Date(k.last_used_at * 1000).toLocaleTimeString()}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                {k.is_active && (
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      onClick={() => handleRotateKey(k.key_id)}
+                                      className="text-[10px] font-mono text-[#f3b82b] hover:underline cursor-pointer"
+                                    >
+                                      [rotate]
+                                    </button>
+                                    <button
+                                      onClick={() => handleRevokeKey(k.key_id)}
+                                      className="text-[10px] font-mono text-[#ff8fb1] hover:underline cursor-pointer"
+                                    >
+                                      [revoke]
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
             </div>
           </div>
