@@ -26,7 +26,7 @@ async def test_health_endpoint(test_app):
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "0.1.0"
+        assert data["version"] == "0.2.0"
 
 @pytest.mark.anyio
 async def test_check_endpoint_clean_and_malicious(test_app):

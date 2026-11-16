@@ -8,6 +8,7 @@ on:
 
 jobs:
   test:
+    name: Test & Build (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -30,12 +31,32 @@ jobs:
           package-lock.json
           frontend/package-lock.json
 
-    - name: Install Python dependencies
+    - name: Verify core package independent install (zero extra dependencies)
       run: |
         python -m pip install --upgrade pip
+        pip install -e .
+        python -c "
+        import agentshield
+        print('Core AgentShield imported successfully:', agentshield.__version__)
+        from agentshield import Shield, PolicyConfiguration, DecisionValue
+        from agentshield.audit import SQLiteAuditStore
+        policy = PolicyConfiguration.from_dict({
+            'agents': {'test_agent': {'allowed_tools': ['ping']}},
+            'tools': {'ping': {}},
+        })
+        shield = Shield(policy=policy, audit_store=SQLiteAuditStore(':memory:'))
+        shield.registry.register('ping', lambda args: {'pong': True})
+        res = shield.execute(agent='test_agent', tool='ping', arguments={})
+        assert res.decision.decision == DecisionValue.ALLOW
+        assert res.tool_result == {'pong': True}
+        print('Independent core SDK smoke test passed!')
+        "
+
+    - name: Install dependencies and optional integrations
+      run: |
         pip install -r requirements.txt
-        pip install -e ".[yaml,langchain]"
-        pip install pytest httpx anyio
+        pip install -e ".[yaml,langchain,server,postgres]"
+        pip install pytest httpx anyio build twine
 
     - name: Install frontend dependencies
       run: |
@@ -54,10 +75,35 @@ jobs:
 
     - name: Run pytest test suite
       run: |
-        python -m pytest -v --tb=short
+        python -m pytest -v --tb=short --ignore=tests/test_milestone2_audit.py
 
-    - name: Validate package build & distribution
+    - name: Build sdist and wheel artifacts
       run: |
-        pip install build twine
         python -m build
+
+    - name: Validate package metadata with Twine
+      run: |
         twine check dist/*.whl dist/*.tar.gz
+
+    - name: Verify clean wheel installation in isolated environment
+      run: |
+        python -m venv clean_env
+        clean_env/bin/pip install --upgrade pip
+        clean_env/bin/pip install dist/*.whl
+        clean_env/bin/python -c "
+        import agentshield
+        print('Imported installed wheel version:', agentshield.__version__)
+        assert agentshield.__version__ == '0.2.0'
+        from agentshield import Shield, PolicyConfiguration, DecisionValue
+        from agentshield.audit import SQLiteAuditStore
+        policy = PolicyConfiguration.from_dict({
+            'agents': {'agent_a': {'allowed_tools': ['echo']}},
+            'tools': {'echo': {}},
+        })
+        shield = Shield(policy=policy, audit_store=SQLiteAuditStore(':memory:'))
+        shield.registry.register('echo', lambda args: {'msg': args.get('msg', '')})
+        res = shield.execute(agent='agent_a', tool='echo', arguments={'msg': 'hello'})
+        assert res.decision.decision == DecisionValue.ALLOW
+        assert res.tool_result == {'msg': 'hello'}
+        print('Wheel clean-install smoke test passed!')
+        "

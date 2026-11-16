@@ -154,7 +154,7 @@ def create_app(
     llm_provider: Optional[LLMProvider] = None,
     simulator: Optional[SimulatorService] = None,
 ) -> FastAPI:
-    app = FastAPI(title="AgentShield API", version="0.1.0")
+    app = FastAPI(title="AgentShield API", version="0.2.0")
 
     # Request size limiter & correlation tracking middleware
     app.add_middleware(CorrelationMiddleware)
@@ -925,7 +925,7 @@ def create_app(
     def health():
         return HealthResponse(
             status="healthy",
-            version="0.1.0",
+            version="0.2.0",
             engine="AgentShield Runtime",
             read_only=is_read_only,
         )

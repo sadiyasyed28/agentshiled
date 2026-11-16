@@ -9,7 +9,7 @@ on:
         type: boolean
         default: true
       confirm:
-        description: "Confirmation token (type 'RELEASE-0.1.0' to authorize publishing)"
+        description: "Confirmation token (type 'RELEASE-0.2.0' to authorize publishing)"
         required: true
         type: string
         default: "DRY-RUN"
@@ -48,7 +48,7 @@ jobs:
           test_env/bin/python -c "
           import agentshield
           print('Successfully imported AgentShield version:', agentshield.__version__)
-          assert agentshield.__version__ == '0.1.0'
+          assert agentshield.__version__ == '0.2.0'
           from agentshield import Shield, PolicyConfiguration, DecisionValue
           policy = PolicyConfiguration.from_dict({
               'agents': {'test_agent': {'allowed_tools': ['ping']}},
@@ -73,7 +73,7 @@ jobs:
     name: Publish to PyPI (Trusted Publishing via OIDC)
     needs: [build-and-verify]
     runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.dry_run == false && github.event.inputs.confirm == 'RELEASE-0.1.0' }}
+    if: ${{ github.event.inputs.dry_run == false && github.event.inputs.confirm == 'RELEASE-0.2.0' }}
     environment:
       name: pypi
       url: https://pypi.org/p/agentshield

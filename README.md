@@ -109,16 +109,34 @@ AgentShield provides pluggable, ACID-compliant persistent storage for audit logs
 
 ---
 
-## Security Guarantees & Operational Boundaries
+## Security Guarantees & Threat Model
 
-| Guarantee | Boundary / Requirement |
+AgentShield provides deterministic, application-level policy enforcement for tool-using AI agents. Understanding what AgentShield does and does not protect against is critical for architecting secure agentic systems.
+
+### What AgentShield Protects Against
+
+| Threat / Risk Vector | How AgentShield Protects |
 | :--- | :--- |
-| **Deterministic Authority** | Policy rules strictly evaluate to `BLOCK` or `ALLOW`. Risk scores can escalate `ALLOW` to `REVIEW` or `BLOCK`, but can never override a policy denial. |
-| **Atomic At-Most-Once Execution** | Competing supervisor approvals for the same review resolve atomically; exactly one worker executes the tool callable. Repeated or replayed approvals fail closed. |
-| **Incident Containment** | Paused agents cannot execute tools under any circumstance—including via supervisor review approval. Approvals for paused agents immediately fail closed. |
-| **Secret Redaction** | Sensitive credentials (passwords, bearer tokens, API keys, private keys) are automatically sanitized across audit stores, review arguments, and event logs. |
-| **Execution Sandboxing** | AgentShield validates parameters and governs authorization deterministically; it does not provide OS-level container isolation (e.g., Docker/gVisor/chroot) for arbitrary hostile bytecode. Tools executing untrusted arbitrary code should run inside isolated sandboxes. |
-| **Operational Boundaries** | Framework callbacks (e.g. LangChain `on_tool_start` or CrewAI agent loggers) run outside AgentShield's execution boundary; callers must ensure sensitive variables are not printed by external hooks. |
+| **Prompt Injection & Tool Hijacking** | Prevents jailbroken prompts or adversarial instructions from steering agents toward unapproved tools or forbidden actions. Unlisted tools fail closed (`BLOCK`). |
+| **Parameter Tampering & Schema Bypass** | Validates arguments against strict schemas, normalizes and freezes values before policy evaluation, and executes using those exact immutable parameters. |
+| **Privilege Escalation** | Enforces agent-scoped permissions and allowlists. Agents cannot claim capabilities outside their declared policy, even if the model asserts authorization. |
+| **SSRF & Network Exfiltration** | Outbound requests are validated against parsed hostname allowlists (never substring matches), preventing SSRF and data exfiltration to unauthorized endpoints. |
+| **Denial-of-Wallet & Tool Loops** | Per-agent and per-tool token-bucket rate limiters, consecutive/cycle loop detectors, and session budgets halt runaway repetitive or high-cost tool calls. |
+| **Unauthorized High-Impact Actions** | Risky operations trigger human-in-the-loop `REVIEW`. Tools are held unexecuted until cryptographically identified supervisors approve with frozen arguments. |
+| **Audit Ledger Tampering** | Every decision and tool execution is recorded to an append-only, SHA-256 cryptographically chained audit ledger with genesis hash verification. |
+| **Credential & Secret Exposure** | API keys, bearer tokens, and private credentials are automatically redacted across audit stores, review arguments, event logs, and UI displays. |
+
+### What AgentShield Does NOT Protect Against (In-Process Limitations)
+
+> [!WARNING]
+> AgentShield is an application-level deterministic policy enforcement gateway, **NOT an operating system sandbox**. It operates within the Python runtime to govern tool invocations.
+
+| Risk Outside Scope | Operational Boundary & Recommended Mitigation |
+| :--- | :--- |
+| **Arbitrary Hostile Bytecode Execution** | If an agent has access to a tool that executes arbitrary, untrusted Python/C/shell code (e.g. `eval()`, `exec()`, bash tools), AgentShield cannot prevent that code from compromising the host. **Mitigation**: Execute untrusted code inside isolated OS/container sandboxes (Docker, gVisor, Firecracker microVMs, or WASI). |
+| **In-Process Memory & Object Tampering** | Untrusted Python code running in the same interpreter process can inspect or patch process memory, monkey-patch `sys.modules`, or invoke `ctypes`. **Mitigation**: Never run untrusted code in the same interpreter process as the AgentShield policy engine. |
+| **Direct OS / Network Sockets Bypassing Tools** | AgentShield intercepts registered tools. If an agent framework or script bypasses tools and invokes standard library `socket`, `subprocess`, or `os.remove` directly, AgentShield cannot intercept it. **Mitigation**: Restrict agents to interact with external environments solely via registered, protected tools. |
+| **External Logging Hooks** | Framework callbacks running outside AgentShield (e.g. raw LangChain `on_tool_start` or unmanaged `print()` statements) run outside AgentShield's execution boundary. **Mitigation**: Ensure external framework loggers do not log raw prompt contexts containing credentials. |
 
 ---
 
@@ -526,6 +544,58 @@ except ToolReviewRequiredError as err:
 - **REVIEW**: Elevated risk triggers human approval queue. The underlying tool never executes prior to approval.
 - **Frozen Arguments & At-Most-Once Approval**: Arguments are validated and frozen at proposal time; approvals execute using those exact frozen values. Repeated approvals fail closed.
 - **Exception Safety**: Internal errors within underlying tools are audited with status `error` or `timeout` and re-raised without retry loops bypassing security checks.
+
+### 6. Remote Telemetry & Cloud Dashboard Streaming
+
+The standalone AgentShield SDK can stream real-time security events, authorization decisions, review requests, and execution telemetry to an AgentShield Hosted Dashboard or Cloud workspace.
+
+#### Zero-Dependency Standalone Guarantee
+When telemetry is not configured, the SDK runs completely offline with zero network calls, zero socket bindings, and zero external service dependencies.
+
+#### Enabling Telemetry via Environment Variables
+Set the following environment variables in your agent runtime environment:
+
+```bash
+# URL of your AgentShield backend API
+export AGENTSHIELD_API_URL="https://dashboard.agentshield.dev"
+
+# Tenant API key obtained from dashboard onboarding or settings (ash_live_...)
+export AGENTSHIELD_API_KEY="ash_live_your_secret_api_key"
+```
+
+When these variables are present, `Shield()` automatically initializes the remote telemetry exporter:
+
+```python
+from agentshield import Shield, PolicyConfiguration
+
+# Telemetry automatically initialized from environment variables
+shield = Shield(policy=policy)
+```
+
+#### Programmatic Telemetry Configuration
+
+You can also configure telemetry explicitly in code:
+
+```python
+from agentshield import Shield, PolicyConfiguration
+from agentshield.telemetry import TelemetryConfig
+
+telemetry = TelemetryConfig(
+    api_url="https://dashboard.agentshield.dev",
+    api_key="ash_live_your_secret_api_key",
+    batch_size=20,
+    flush_interval_seconds=1.0,
+    spool_enabled=True,  # Local disk spooling on network loss
+)
+
+shield = Shield(policy=policy, telemetry_config=telemetry)
+```
+
+#### Offline Resilience & Bounded Local Spooling
+- **Non-Blocking Execution**: Telemetry events are queued and flushed asynchronously in a dedicated worker thread, adding zero latency to agent tool execution.
+- **Persistent Disk Spooling**: If the dashboard API is unreachable or experiences transient network failures, events are securely spooled to a bounded local directory (`TelemetrySpool`) and retried with exponential backoff once connectivity is restored.
+- **Tenant Isolation**: Telemetry requests are authenticated using cryptographic API keys and strictly isolated to the authenticated workspace.
+- **Redaction**: All secret credentials, tokens, and sensitive arguments are redacted *before* transmission over the wire.
 
 ---
 
