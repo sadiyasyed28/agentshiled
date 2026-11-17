@@ -53,8 +53,15 @@ export const BenchmarkRunsTable: React.FC<BenchmarkRunsTableProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-[#231e47]">
-              {runs.map((run) => {
-                const isSelected = run.id === selectedRunId;
+              {runs.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-6 text-center text-xs font-mono text-[#8e87be]">
+                    No benchmark runs recorded
+                  </td>
+                </tr>
+              ) : (
+                runs.map((run) => {
+                  const isSelected = run.id === selectedRunId;
 
                 return (
                   <tr
@@ -110,7 +117,8 @@ export const BenchmarkRunsTable: React.FC<BenchmarkRunsTableProps> = ({
                     </td>
                   </tr>
                 );
-              })}
+              })
+            )}
             </tbody>
           </table>
         </div>

@@ -14,6 +14,7 @@ from agentshield.audit.store import (
     GENESIS_HASH,
     AuditRecord,
     AuditStore,
+    DuplicateEventError,
     compute_record_hash,
     redact_sensitive_data,
 )
@@ -62,6 +63,7 @@ class PostgresAuditStore(AuditStore):
                 );
             """)
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(64) NOT NULL DEFAULT 'default';")
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS event_id VARCHAR(128);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_logs(decision);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_logs(agent);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tool ON audit_logs(tool);")
@@ -69,6 +71,19 @@ class PostgresAuditStore(AuditStore):
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_record_hash ON audit_logs(record_hash);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_correlation_id ON audit_logs(correlation_id);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id, timestamp DESC);")
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_tenant_event ON audit_logs(tenant_id, event_id) WHERE event_id IS NOT NULL;")
+
+    def has_event(self, tenant_id: str, event_id: str) -> bool:
+        """Checks if an event_id has already been recorded for a tenant."""
+        if not event_id:
+            return False
+        with self.connection_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM audit_logs WHERE tenant_id = %s AND event_id = %s LIMIT 1;",
+                (tenant_id, event_id),
+            )
+            return cursor.fetchone() is not None
 
     def log_decision(
         self,
@@ -80,18 +95,22 @@ class PostgresAuditStore(AuditStore):
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         tenant_id: str = "default",
+        timestamp: Optional[str] = None,
+        event_id: Optional[str] = None,
     ) -> int:
         cleaned_args = redact_sensitive_data(arguments or {})
         cleaned_error = redact_sensitive_data(error) if error is not None else None
         rules = [r.split(":")[0].strip() for r in decision.reasons if ":" in r]
 
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = timestamp or datetime.now(timezone.utc).isoformat()
         decision_str = decision.decision.value if hasattr(decision.decision, "value") else str(decision.decision)
         severity_str = decision.severity.value if hasattr(decision.severity, "value") else str(decision.severity)
         args_json = json.dumps(cleaned_args)
         reasons_json = json.dumps(decision.reasons)
         rules_json = json.dumps(rules)
         risk_factors_json = json.dumps([])
+
+        eff_tenant = getattr(decision, "tenant_id", None) or tenant_id or "default"
 
         with self.connection_manager.get_connection() as conn:
             cursor = conn.cursor()
@@ -101,6 +120,14 @@ class PostgresAuditStore(AuditStore):
             except Exception:
                 # If mock or dialect doesn't support pg_advisory_xact_lock, continue
                 pass
+
+            if event_id:
+                cursor.execute(
+                    "SELECT 1 FROM audit_logs WHERE tenant_id = %s AND event_id = %s LIMIT 1;",
+                    (eff_tenant, event_id),
+                )
+                if cursor.fetchone() is not None:
+                    raise DuplicateEventError(eff_tenant, event_id)
 
             cursor.execute("SELECT record_hash FROM audit_logs ORDER BY id DESC LIMIT 1;")
             latest = cursor.fetchone()
@@ -124,36 +151,42 @@ class PostgresAuditStore(AuditStore):
                 policy_version_hash=policy_version_hash,
             )
 
-            eff_tenant = getattr(decision, "tenant_id", None) or tenant_id or "default"
-            cursor.execute("""
-                INSERT INTO audit_logs (
-                    timestamp, agent, tool, arguments, decision, allowed,
-                    reasons, rules_triggered, risk_score, severity,
-                    risk_factors, execution_status, error, policy_version_hash,
-                    prev_hash, record_hash, correlation_id, trace_id, tenant_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id;
-            """, (
-                timestamp,
-                decision.agent,
-                decision.tool,
-                args_json,
-                decision_str,
-                1 if decision.allowed else 0,
-                reasons_json,
-                rules_json,
-                float(decision.risk_score),
-                severity_str,
-                risk_factors_json,
-                execution_status,
-                cleaned_error,
-                policy_version_hash,
-                prev_hash,
-                record_hash,
-                correlation_id or getattr(decision, "correlation_id", None),
-                trace_id or getattr(decision, "trace_id", None),
-                eff_tenant,
-            ))
+            try:
+                cursor.execute("""
+                    INSERT INTO audit_logs (
+                        timestamp, agent, tool, arguments, decision, allowed,
+                        reasons, rules_triggered, risk_score, severity,
+                        risk_factors, execution_status, error, policy_version_hash,
+                        prev_hash, record_hash, correlation_id, trace_id, tenant_id, event_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id;
+                """, (
+                    timestamp,
+                    decision.agent,
+                    decision.tool,
+                    args_json,
+                    decision_str,
+                    1 if decision.allowed else 0,
+                    reasons_json,
+                    rules_json,
+                    float(decision.risk_score),
+                    severity_str,
+                    risk_factors_json,
+                    execution_status,
+                    cleaned_error,
+                    policy_version_hash,
+                    prev_hash,
+                    record_hash,
+                    correlation_id or getattr(decision, "correlation_id", None),
+                    trace_id or getattr(decision, "trace_id", None),
+                    eff_tenant,
+                    event_id,
+                ))
+            except Exception as e:
+                err_lower = str(e).lower()
+                if "unique" in err_lower or "event_id" in err_lower or "idx_audit_tenant_event" in err_lower:
+                    raise DuplicateEventError(eff_tenant, event_id or "unknown") from e
+                raise
             row = cursor.fetchone()
             return int(row[0]) if row else 0
 
@@ -198,7 +231,7 @@ class PostgresAuditStore(AuditStore):
             SELECT id, timestamp, agent, tool, arguments, decision, allowed,
                    reasons, rules_triggered, risk_score, severity, risk_factors,
                    execution_status, error, policy_version_hash, prev_hash, record_hash,
-                   correlation_id, trace_id, tenant_id
+                   correlation_id, trace_id, tenant_id, event_id
             FROM audit_logs
             {where_clause}
             ORDER BY id DESC
@@ -235,9 +268,34 @@ class PostgresAuditStore(AuditStore):
                         correlation_id=row_dict.get("correlation_id"),
                         trace_id=row_dict.get("trace_id"),
                         tenant_id=row_dict.get("tenant_id", "default"),
+                        event_id=row_dict.get("event_id"),
                     )
                 )
         return records
+
+    def get_discovered_agents(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        with self.connection_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT agent,
+                       COUNT(*) as total_events,
+                       SUM(CASE WHEN decision = 'BLOCK' THEN 1 ELSE 0 END) as blocked_count,
+                       MAX(timestamp) as last_active
+                FROM audit_logs
+                WHERE tenant_id = %s
+                GROUP BY agent
+                ORDER BY total_events DESC;
+            """, (tenant_id,))
+            rows = cursor.fetchall()
+            return [
+                {
+                    "agent": row[0],
+                    "total_events": int(row[1]),
+                    "blocked_count": int(row[2]) if row[2] is not None else 0,
+                    "last_active": row[3],
+                }
+                for row in rows
+            ]
 
     def verify_integrity(self, cursor: Optional[Any] = None) -> Dict[str, Any]:
         if cursor is not None:

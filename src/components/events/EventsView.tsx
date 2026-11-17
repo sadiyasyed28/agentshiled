@@ -4,6 +4,7 @@ import { EventsKpiSection } from './EventsKpiSection';
 import { EventsFilterToolbar } from './EventsFilterToolbar';
 import { EventsTable } from './EventsTable';
 import { EventDrawer } from './EventDrawer';
+import { PixelLayersIcon } from '../pixel/PixelIcons';
 import { ALL_EVENTS } from './eventsData';
 import type { SecurityEventRecord, EventsFilterState, EventDecision, ExecutionStatus } from './eventsTypes';
 import { apiClient, type ApiEventItem } from '../../api/client';
@@ -34,8 +35,11 @@ export const EventsView: React.FC<EventsViewProps> = ({
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [dateRange, setDateRange] = useState('Last 7 Days');
   const [localRefreshing, setLocalRefreshing] = useState(false);
-  const [eventsList, setEventsList] = useState<SecurityEventRecord[]>(ALL_EVENTS);
+  const [eventsList, setEventsList] = useState<SecurityEventRecord[]>([]);
   const [isLive, setIsLive] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [showDemoDataset, setShowDemoDataset] = useState(false);
 
   // Selected event for detail drawer
   const [selectedEvent, setSelectedEvent] = useState<SecurityEventRecord | null>(null);
@@ -96,20 +100,24 @@ export const EventsView: React.FC<EventsViewProps> = ({
   };
 
   const loadEvents = async () => {
+    setIsLoading(true);
+    setApiError(null);
     try {
       const res = await apiClient.getEvents({ limit: 100 });
-      if (res && Array.isArray(res.events) && res.events.length > 0) {
+      if (res && Array.isArray(res.events)) {
         const mapped = res.events.map(mapApiEventToRecord);
         setEventsList(mapped);
         setIsLive(true);
       } else {
-        setEventsList(ALL_EVENTS);
-        setIsLive(false);
+        setEventsList([]);
+        setIsLive(true);
       }
     } catch {
-      // Offline or network error: fall back to rich demo dataset
-      setEventsList(ALL_EVENTS);
+      setEventsList([]);
       setIsLive(false);
+      setApiError('Unable to load security events from AgentShield API.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -170,8 +178,10 @@ export const EventsView: React.FC<EventsViewProps> = ({
   };
 
   // Filtered dataset
+  const activeDataset = showDemoDataset ? ALL_EVENTS : eventsList;
+
   const filteredEvents = useMemo(() => {
-    return eventsList.filter((evt) => {
+    return activeDataset.filter((evt) => {
       // 1. Search query
       if (filters.searchQuery.trim()) {
         const query = filters.searchQuery.toLowerCase();
@@ -224,7 +234,7 @@ export const EventsView: React.FC<EventsViewProps> = ({
 
       return true;
     });
-  }, [eventsList, filters]);
+  }, [activeDataset, filters]);
 
   // Sorted dataset
   const sortedEvents = useMemo(() => {
@@ -299,18 +309,72 @@ export const EventsView: React.FC<EventsViewProps> = ({
           }`}
         >
           {/* Status Indicator Banner */}
-          <div className="flex items-center justify-between pb-1.5">
+          <div className="flex items-center justify-between pb-1.5 flex-wrap gap-2">
             <span
               className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
-                isLive
+                showDemoDataset
+                  ? 'bg-[#403413] text-[#facc15] border-[#6b551c]'
+                  : isLive
                   ? 'bg-[#153e28] text-[#4ade80] border-[#1b6d39]'
-                  : 'bg-[#2b2559] text-[#c084fc] border-[#3e3478]'
+                  : 'bg-[#4a1c25] text-[#f87171] border-[#782836]'
               }`}
             >
-              <span className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-[#4ade80]' : 'bg-[#c084fc]'}`} />
-              {isLive ? 'LIVE TELEMETRY (Connected)' : 'DEMO MODE (Offline Dataset)'}
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  showDemoDataset ? 'bg-[#facc15]' : isLive ? 'bg-[#4ade80]' : 'bg-[#f87171]'
+                }`}
+              />
+              {showDemoDataset
+                ? 'REFERENCE / DEMO DATASET (Static Fixtures)'
+                : isLive
+                ? `LIVE TELEMETRY (${eventsList.length} Events)`
+                : 'API DISCONNECTED'}
             </span>
+
+            <button
+              onClick={() => setShowDemoDataset((prev) => !prev)}
+              className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#1e1a3d] hover:bg-[#2b2559] border border-[#3e3478] text-[#c084fc] transition-colors cursor-pointer"
+            >
+              {showDemoDataset ? '← Switch to Live Events' : 'View Sample Reference Dataset'}
+            </button>
           </div>
+
+          {/* API Error Notification */}
+          {apiError && (
+            <div className="mb-3 p-3 bg-[#4a1c25]/50 border border-[#782836] rounded-lg text-xs flex items-center justify-between shadow-sm">
+              <span className="text-[#f87171] font-mono flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-[#f87171] animate-pulse" />
+                {apiError}
+              </span>
+              <button
+                onClick={loadEvents}
+                className="px-2.5 py-1 bg-[#4a1c25] hover:bg-[#5e232e] text-[#f87171] hover:text-white border border-[#782836] rounded text-[11px] font-semibold transition-colors cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* Empty State Banner if no events and not loading */}
+          {!showDemoDataset && eventsList.length === 0 && !isLoading && !apiError && (
+            <div className="mb-3 p-4 bg-[#16142e] border border-[#2b2559] rounded-lg text-center pixel-corners">
+              <div className="w-8 h-8 rounded-full bg-[#26204d] text-[#c4bbf0] flex items-center justify-center mx-auto mb-2">
+                <PixelLayersIcon size={18} />
+              </div>
+              <h4 className="text-white text-sm font-semibold">No Security Events Recorded</h4>
+              <p className="text-xs text-[#8e87bf] mt-1 max-w-md mx-auto">
+                Your agents haven't generated any tool proposals yet. Run an agent with the AgentShield Python SDK to begin streaming real-time security events.
+              </p>
+              <div className="mt-2.5 flex items-center justify-center gap-2">
+                <button
+                  onClick={() => setShowDemoDataset(true)}
+                  className="px-2.5 py-1 bg-[#231e47] hover:bg-[#302a5c] text-[#c084fc] border border-[#403775] rounded text-xs font-mono cursor-pointer"
+                >
+                  Inspect Sample Event Format
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* 1. EVENTS PAGE HEADER */}
           <EventsPageHeader
@@ -322,7 +386,7 @@ export const EventsView: React.FC<EventsViewProps> = ({
           />
 
           {/* 2. KPI CARDS SECTION */}
-          <EventsKpiSection />
+          <EventsKpiSection events={activeDataset} />
 
           {/* 3. FILTER AND SEARCH TOOLBAR */}
           <EventsFilterToolbar

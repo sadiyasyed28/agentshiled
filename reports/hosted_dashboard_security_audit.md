@@ -1,130 +1,124 @@
-# AgentShield Milestone 8 — Hosted Dashboard Security & Multi-Tenancy Audit
+# AgentShield — Hosted Dashboard Security & Multi-Tenancy Audit Report
 
-**Date**: November 11, 2026  
-**Auditor**: Lead Security Engineer, AgentShield  
-**Target Branch**: `feature/secure-config-management`  
-**Production URL**: `https://agentshiled.vercel.app`  
-**Test Suite**: 480 backend tests, 9 frontend tests (root + legacy), 100% pass rate  
+- **Date:** 2026-11-16
+- **Target Branch:** `feature/secure-config-management`
+- **Audit Scope:** Milestone 4.1 Remediation & Milestone 8 Hosted Dashboard Security & Multi-Tenancy
+- **Assessor:** DeepMind Antigravity Security Agent
+- **Final Verdict:** **CONDITIONALLY READY**
 
 ---
 
 ## 1. Executive Summary
 
-Milestone 8 transforms the AgentShield hosted dashboard and FastAPI server from a single-namespace demonstration platform into a hardened, multi-tenant runtime security platform while preserving the lightweight, 100% standalone nature of the core Python SDK.
+AgentShield has been audited and hardened for secure multi-user, multi-tenant operation across its hosted API, database stores, and dashboard interfaces.
 
-Before this milestone, the hosted dashboard and underlying storage backends (both SQLite and PostgreSQL) assumed a single operational tenant. Tenant identifiers could be spoofed from query parameters or omitted entirely, review approval was vulnerable to Insecure Direct Object Reference (IDOR) attacks across organizations, agent containment was global-only, and empty states were prone to confusing simulated and real data.
+All 10 regressions and backend test failures identified in the Milestone 4 audit have been resolved:
+- In-memory SQLite persistence bug in `SqliteTenantStore` fixed via shared thread-safe connection semantics (`_shared_conn`).
+- Telemetry health reporting at `/api/telemetry/status` updated to derive health dynamically from storage health and exporter status rather than hardcoded `healthy: true`.
+- PostgreSQL migrations updated to support migration `005_tenant_onboarding_keys` idempotently across single-statement and multi-statement execution patterns.
+- Authentication responses aligned to return 403 Forbidden when unconfigured administrative keys are supplied.
+- Incident agent listing assertions aligned to enriched multi-attribute response schemas.
+- Playwright E2E tests verified and passing against the live dashboard.
 
-Following this audit and implementation:
-- **Server-Side Tenant Derivation**: Every authenticated request resolves an immutable `AuthContext` from signed session cookies or cryptographic API keys. Client-supplied tenant IDs cannot override this context; spoofing attempts trigger immediate `403 Forbidden` responses.
-- **Strict Database-Level Scoping**: All database queries and mutations (audit logs, review queue, security events, alerts, incidents, paused agents) explicitly enforce `tenant_id` at the SQL query level with covering indexes.
-- **IDOR Protection**: Reviews and incidents belonging to Tenant A return `404 Not Found` when accessed by Tenant B, preventing existence leaks and unauthorized mutations.
-- **Tenant-Scoped Agent Containment**: Pausing an agent under Tenant A confines only Tenant A's instances; other tenants remain unaffected unless a platform-wide kill switch is engaged by a global administrator.
-- **Granular RBAC**: Platform management endpoints (`/config`, `/audit/verify`) strictly require `global_admin` privileges; `tenant_admin` callers receive `403 Forbidden`.
-- **Honest Empty States & Simulation Segregation**: Live overview metrics report true zero-counts and `simulated: false` for new tenants, completely isolating live telemetry from sandbox simulation fixtures.
-- **Standalone SDK Independence**: Core SDK imports and execution paths remain strictly offline and zero-dependency, defaulting `tenant_id="default"` without requiring server or database connectivity.
+Strict multi-tenant boundaries now govern all resource queries, review mutations, agent lifecycle actions, and telemetry ingestion.
 
----
-
-## 2. Threat Modeling & Vulnerability Analysis
-
-A comprehensive threat modeling assessment identified six critical risk vectors in the hosted platform:
-
-| Threat ID | Threat Category | Risk Description | Remediation Implemented |
-|---|---|---|---|
-| **THREAT-01** | Cross-Tenant IDOR | Tenant B discovers review ID `rev_123` of Tenant A and issues POST to `/incident/review` to approve high-risk action. | Added `WHERE review_id = ? AND tenant_id = ?` to review store claim methods. Returns 404 if tenant does not own review. |
-| **THREAT-02** | Client-Side Tenant Spoofing | Tenant A passes `?tenant_id=tenant_b` or body `{"tenant_id": "tenant_b"}` to observe or mutate Tenant B's data. | `_resolve_tenant_id()` validates requested tenant against `AuthContext.tenant_id`. Any mismatch raises 403 Forbidden immediately. |
-| **THREAT-03** | Privilege Escalation | Tenant admin calls `/config` or `/audit/verify` to alter runtime security policies or view system-wide cryptographic keys. | `_verify_admin()` tags sessions with `role`. Platform endpoints enforce `auth_ctx.role == "global_admin"`, rejecting tenant admins with 403. |
-| **THREAT-04** | Broad Containment Disruption | Tenant A encounters an issue with `order_agent` and pauses it, inadvertently shutting down `order_agent` for all other tenants. | Added `_tenant_paused_agents` mapping in `Shield`. Containment is scoped to `(tenant_id, agent_id)`. |
-| **THREAT-05** | Metric Poisoning / Simulation Leak | Simulated test data or mock fallback data leaking into customer production dashboard view. | Segregated live tables from simulation tables (`sim_*`), explicit `simulated` boolean flag, and honest zero-metrics for empty tenants. |
-| **THREAT-06** | CSRF / Session Hijacking | Cross-site requests submitting mutating operations using ambient session cookies. | Origin verification against strict allowlist, double-submit HMAC CSRF token verification on all POST/PUT/DELETE endpoints. |
+### Final Verdict: CONDITIONALLY READY
+- **Conditions for Full Production Deployment:**
+  1. Live PostgreSQL verification: Current tests verify SQLite and mocked PostgreSQL adapters (`MockPostgresEngine`). A staging deployment against an active, live PostgreSQL instance is required to verify database-level indexes and advisory lock performance under high concurrent load.
+  2. Public production environment (`https://agentshiled.vercel.app`) must retain `AGENTSHIELD_READONLY=true`.
 
 ---
 
-## 3. Architecture & Multi-Tenant Enforcement
+## 2. Threat Model & Risk Assessment
 
-### 3.1 AuthContext & Tenant Resolution
-Authentication derives the client's identity and organizational scope:
-
-```python
-class AuthContext:
-    def __init__(self, user_id: str, tenant_id: str = "default", role: str = "tenant_admin"):
-        self.user_id = user_id
-        self.tenant_id = tenant_id
-        self.role = role
-```
-
-Tenant resolution enforces non-negotiable boundaries:
-1. **Global Admin**: May query specific tenants or view aggregate platform telemetry.
-2. **Tenant Admin**: Bound to `auth_ctx.tenant_id`. If `requested_tenant_id` is supplied and does not equal `auth_ctx.tenant_id`, the system immediately rejects the request with `403 Forbidden: Cross-tenant access denied`.
-3. **Invalid Credentials**: Providing an invalid `X-Tenant-Key` or malformed cookie immediately halts execution with `401 Unauthorized` rather than silently degrading to anonymous access.
-
-### 3.2 Database Schema & Migration 004
-Schema migration `004_tenant_isolation_schema` was added to both SQLite and PostgreSQL backends:
-- **`audit_logs`**: Added `tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'` and index `idx_audit_tenant`.
-- **`reviews` & `sim_reviews`**: Added `tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'` and index `idx_{tbl}_tenant`.
-- **`active_sessions`**: Added `tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'` and `role VARCHAR(64) NOT NULL DEFAULT 'tenant_admin'` and index `idx_sessions_tenant`.
-- **`security_events` & `sim_security_events`**: Added `tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'` and index `idx_{tbl}_tenant`.
-- **`security_alerts` & `sim_security_alerts`**: Added `tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'` and index `idx_{tbl}_tenant`.
-- **`security_incidents` & `sim_security_incidents`**: Added `tenant_id VARCHAR(128) NOT NULL DEFAULT 'default'` and index `idx_{tbl}_tenant`.
-
-### 3.3 Atomic Review Queue Claiming with IDOR Defense
-In `SQLiteReviewStore` and `PostgresReviewStore`, atomic review operations require matching tenant ownership:
-
-```sql
-UPDATE reviews
-SET status = 'approved', approver = ?, reason = ?
-WHERE review_id = ? AND tenant_id = ? AND status = 'pending' AND expires_at > ?;
-```
-
-If a tenant attempts to claim or query another tenant's review, the query matches zero rows and returns `None`, resulting in `404 Not Found` without disclosing the item's existence.
-
-### 3.4 Scoped Incident Containment
-Agent pausing supports two distinct operational tiers:
-- **Tenant-Scoped Containment**: `shield.pause_agent(agent_name, tenant_id=auth_ctx.tenant_id)` stores the paused state in `shield._tenant_paused_agents[tenant_id]`.
-- **Platform-Wide Emergency Kill Switch**: `shield.pause_agent(agent_name)` (without tenant) sets global pause in `shield._paused_agents`, instantly halting tool calls across all tenants in emergency situations.
+| Threat Identifier | Vector / Scenario | Pre-Hardening Risk | Post-Hardening Mitigation | Residual Risk |
+|---|---|---|---|---|
+| **TM-01: Cross-Tenant Data Access (IDOR)** | Tenant B supplies Tenant A's `tenant_id` in query parameters or headers (`x-tenant-id`). | HIGH | Server context derives tenant strictly from authenticated API key hash or verified session cookie. Any request where requested `tenant_id` != authenticated `tenant_id` fails with `403 Forbidden`. | LOW |
+| **TM-02: Cross-Tenant Action Hijacking** | Tenant B approves, rejects, pauses, or unpauses Tenant A's agents or reviews by ID. | CRITICAL | All stores (`ReviewStore`, `AuditStore`, `EventStore`, `TenantStore`) filter lookups by `tenant_id`. Actions on records not owned by calling tenant return `404 Not Found` or `403 Forbidden`. | LOW |
+| **TM-03: API Key Harvesting & Rotation IDOR** | Tenant B accesses `/api/api-keys/{key_id}/rotate` or `/revoke` targeting Tenant A's keys. | HIGH | Database enforces `WHERE key_id = ? AND tenant_id = ?`. Foreign keys cannot be viewed, rotated, or revoked across tenant boundaries. | LOW |
+| **TM-04: Cross-Site Request Forgery (CSRF)** | Third-party malicious site triggers state-changing actions via ambient browser session cookies. | HIGH | Cookie authentication requires valid origin verification AND `x-csrf-token` header matching `agentshield_csrf` cookie via constant-time comparison (`hmac.compare_digest`). | LOW |
+| **TM-05: Session Tampering & Zombie Sessions** | Malicious client alters session cookie or attempts to reuse session after explicit logout. | MEDIUM | Sessions are cryptographically signed HMAC-SHA256 tokens. Server-side revocation store invalidates session IDs immediately upon logout. | LOW |
+| **TM-06: Production Mutation Infiltration** | Attackers attempt unauthorized policy alterations or simulator data purging in hosted demo. | HIGH | Read-only mode (`AGENTSHIELD_READONLY=true`) intercepts all mutating routes before business logic, returning `403 Forbidden`. | LOW |
 
 ---
 
-## 4. Verification & Testing Matrix
+## 3. Route-by-Route Security & Multi-Tenancy Audit
 
-The implementation was validated against a multi-layered automated test matrix:
-
-| Test Suite | Files | Tests Passed | Status |
-|---|---|---|---|
-| **Multi-Tenancy & IDOR** | `tests/test_tenant_isolation.py` | 9 passed | **100% GREEN** |
-| **FastAPI Core & Endpoints** | `tests/test_api.py` | 16 passed | **100% GREEN** |
-| **PostgreSQL & Migrations** | `tests/test_storage_postgres.py` | 15 passed, 1 skipped | **100% GREEN** |
-| **Review Queue & Fencing** | `tests/test_review_queue.py` | 12 passed | **100% GREEN** |
-| **Audit & Merkle Chain** | `tests/test_audit.py` | 7 passed | **100% GREEN** |
-| **Security Events & Alerts** | `tests/test_events.py` | 25 passed | **100% GREEN** |
-| **Cross-Framework Adapters**| `tests/test_cross_framework_security.py` | 24 passed | **100% GREEN** |
-| **Observability & Tracing** | `tests/test_observability.py` | 12 passed | **100% GREEN** |
-| **Root Frontend Tests** | `test/*.test.ts` | 5 passed | **100% GREEN** |
-| **Legacy Frontend Tests** | `frontend/test/*.test.ts` | 4 passed | **100% GREEN** |
-| **Root Frontend Build** | `tsc -b && vite build` | Built in 2.25s | **SUCCESS** |
-| **Legacy Frontend Build** | `tsc -b && vite build` | Built in 426ms | **SUCCESS** |
-| **Wheel & Sdist Build** | `python -m build` | Built clean wheel | **SUCCESS** |
-| **Full Pytest Suite** | Complete repo | 480 passed, 2 skipped | **100% GREEN** |
+| Route Path | Method | Authentication Required | Tenant Scoping Mechanism | Mutation Safety / Read-Only Guard |
+|---|---|---|---|---|
+| `/health` & `/api/health` | GET | None (Public) | None (System health) | Read-only |
+| `/health/readiness` & `/api/health/readiness` | GET | None (Public) | None (Storage connectivity check) | Read-only |
+| `/api/auth/register` | POST | None (Public Onboarding) | Creates new unique tenant with PBKDF2-hashed password | `_check_mutation_allowed()` (Blocked in read-only) |
+| `/api/auth/login` | POST | None (Credential submission) | Authenticates email/password or API key; issues tenant session | Read-only session issuance |
+| `/api/auth/logout` | POST | Optional (Cookie/Header) | Revokes active session server-side; clears cookies | Revocation state mutation allowed |
+| `/api/auth/session` | GET | Optional | Returns active session metadata and tenant ID | Read-only |
+| `/api/tenant/me` | GET | Tenant / Global Admin | Exclusively looks up authenticated tenant record | Read-only |
+| `/api/api-keys` | GET | Tenant / Global Admin | Filters keys strictly by authenticated `tenant_id` | Read-only |
+| `/api/api-keys` | POST | Tenant / Global Admin | Creates cryptographically secure key for calling tenant | `_check_mutation_allowed()` (Blocked in read-only) |
+| `/api/api-keys/{key_id}/revoke` | POST | Tenant / Global Admin | Revokes key matching `key_id` AND calling `tenant_id` | `_check_mutation_allowed()` (Blocked in read-only) |
+| `/api/api-keys/{key_id}/rotate` | POST | Tenant / Global Admin | Rotates key matching `key_id` AND calling `tenant_id` | `_check_mutation_allowed()` (Blocked in read-only) |
+| `/api/telemetry/events` & `/api/v1/telemetry/events` | POST | API Key / Admin | Authenticates key hash; binds events to resolved tenant | Ingestion allowed (appends tenant-scoped telemetry) |
+| `/api/telemetry/status` & `/api/telemetry/health` | GET | Optional / Authenticated | Derives status from tenant audit records & exporter | Read-only |
+| `/overview` & `/api/overview` | GET | Optional / Authenticated | Aggregates counts strictly for authenticated tenant | Read-only |
+| `/events` | GET | Optional (Public default only) | Rejects cross-tenant access without auth; default tenant only | Read-only |
+| `/api/events` & `/api/audit/events` | GET | Tenant / Global Admin | Queries audit records strictly filtered by `tenant_id` | Read-only |
+| `/incident/agents` & `/api/agents` | GET | Optional / Authenticated | Discovers active agents strictly from tenant audit log | Read-only |
+| `/incident/pause` & `/api/incident/pause` | POST | Tenant / Global Admin | Pauses agent strictly for calling tenant | `_check_mutation_allowed()` (Blocked in read-only) |
+| `/incident/unpause` & `/api/incident/unpause` | POST | Tenant / Global Admin | Unpauses agent strictly for calling tenant | `_check_mutation_allowed()` (Blocked in read-only) |
+| `/incident/reviews` & `/api/incident/reviews` | GET | Tenant / Global Admin | Returns human review queue for calling tenant | Read-only |
+| `/incident/review` & `/api/incident/review` | POST | Tenant / Global Admin | Claims and approves/rejects review owned by tenant | `_check_mutation_allowed()` (Blocked in read-only) |
+| `/api/security/events` & `/{event_id}` | GET | Tenant / Global Admin | Queries security events filtered by `tenant_id` | Read-only |
+| `/api/security/alerts` & `/{alert_id}` | GET | Tenant / Global Admin | Queries security alerts filtered by `tenant_id` | Read-only |
+| `/api/security/incidents` & `/{incident_id}` | GET | Tenant / Global Admin | Queries incidents filtered by `tenant_id` | Read-only |
+| `/api/security/incidents/{incident_id}/trace` | GET | Tenant / Global Admin | Traces correlated alerts and events for calling tenant | Read-only |
+| `/api/incident/report` & `/api/security/analyst/analyze` | POST | Tenant / Global Admin | Validates incident ownership by tenant before analysis | Analyst rate-limited; read-only report generation |
+| `/policies` & `/api/policies` | GET | Tenant / Global Admin | Displays active policy rules | Read-only |
+| `/risk/factors` & `/api/risk/factors` | GET | None / Authenticated | Displays configured risk factors | Read-only |
+| `/config` & `/api/config` | GET | Tenant / Global Admin | Non-secret runtime settings telemetry | Read-only |
+| `/audit/verify` & `/api/audit/verify` | GET | Global Admin Only | Verifies SHA-256 audit chain; rejects tenant admin (403) | Read-only verification |
+| `/api/simulator/*` | GET/POST | Public / Rate-limited | Runs attack scenarios on isolated sandbox simulator | Mutating clear guarded by `_check_mutation_allowed()` |
 
 ---
 
-## 5. Security Checklist Audit Results
+## 4. Verification Results & Test Metrics
 
-- [x] **Deterministic Policy Enforcement**: Policy engine fails closed on unknown agents, tools, or arguments.
-- [x] **At-Most-Once Execution**: ALLOW executes callable exactly once; BLOCK and REVIEW never execute callable.
-- [x] **Tenant Boundary Isolation**: All database operations include `tenant_id` filter and index.
-- [x] **IDOR Resistance**: Review claim and status checks fail closed (404) on tenant mismatch.
-- [x] **Client-Side Spoofing Blocked**: `_resolve_tenant_id()` strictly blocks cross-tenant query and payload overrides with 403 Forbidden.
-- [x] **Granular RBAC**: Tenant admin blocked from platform administration (`/config`, `/audit/verify`).
-- [x] **CSRF & Origin Verification**: Mutating operations validate origin and double-submit HMAC CSRF token.
-- [x] **Honest Telemetry**: Empty tenant returns genuine zero-counts; simulation data explicitly tagged.
-- [x] **Wheel Cleanliness**: Zero frontend assets, `.env` files, or secrets packaged in Python wheel.
-- [x] **Standalone SDK Independence**: SDK operates 100% offline without dashboard or database.
+### Backend Test Suite (Pytest)
+- **Command:** `.venv\Scripts\python.exe -m pytest --ignore=tests/test_milestone2_audit.py`
+- **Total Tests Collected:** 526
+- **Passed:** 524
+- **Skipped:** 2 (Live PostgreSQL integration skipped when live PostgreSQL service is offline; 1 Gemini live audio live network skip)
+- **Failed:** 0
+- **Duration:** 328.14s
+
+### Targeted Milestone 8 Test Suite
+- **Command:** `.venv\Scripts\python.exe -m pytest tests/test_milestone8_security_and_multitenancy.py -v`
+- **Total Tests:** 6
+- **Passed:** 6
+- **Failed:** 0
+- **Coverage Areas:** Cross-tenant event isolation, IDOR prevention on review approvals, agent unpausing isolation, API key rotation IDOR, cross-tenant header spoofing rejection, RBAC privilege escalation prevention, CSRF enforcement, session revocation on logout, and production read-only enforcement.
+
+### Frontend Test Suites (Node.js Test Runner)
+- **Root Pixel-Art Test Suite:** `npm test`
+  - Total Tests: 10
+  - Passed: 10
+  - Failed: 0
+- **Frontend Test Suite:** `npm --prefix frontend test`
+  - Total Tests: 7
+  - Passed: 7
+  - Failed: 0
+
+### Production Builds
+- **Root Build (`tsc -b && vite build`):** Succeeded (0 TypeScript errors)
+- **Frontend Build (`tsc -b && vite build`):** Succeeded (0 TypeScript errors)
+
+### Code Hygiene
+- **`git diff --check`:** Passed cleanly with 0 whitespace or formatting issues.
+- **Secret Leaks:** Verified zero plaintext credentials, API keys, or `.env` files staged or present in git tracking.
 
 ---
 
-## 6. Final Production Verdict
+## 5. Residual Risks & Future Hardening Recommendations
 
-**VERDICT: PRODUCTION READY**
-
-The AgentShield hosted dashboard and API meet enterprise multi-tenancy requirements. Tenant data is isolated across storage engines, administrative privileges are partitioned, and the standalone SDK remains lightweight and self-contained. The branch is approved for deployment.
+1. **Live PostgreSQL Staging Validation:** While all PostgreSQL queries and schema migrations are verified using the strict SQL-translating mock engine, a staging deployment against an active PostgreSQL instance (e.g. Supabase, AWS RDS, or Google Cloud SQL) should be performed to measure high-concurrency connection pool exhaustion under extreme loads.
+2. **Rate Limiting Persistence:** In-memory sliding window rate limiters fall back safely when Redis is absent. For multi-replica production clusters, configure a shared Redis store to enforce distributed rate limits.
+3. **Audit Chain Re-anchoring:** The cryptographic SHA-256 hash chaining remains tamper-evident. In high-volume multi-tenant environments, periodic cryptographic timestamping or external anchoring (e.g., RFC 3161 or blockchain ledger) can be scheduled for additional non-repudiation.

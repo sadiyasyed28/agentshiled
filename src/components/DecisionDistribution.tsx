@@ -14,19 +14,19 @@ interface DecisionDistributionProps {
 }
 
 export const DecisionDistribution: React.FC<DecisionDistributionProps> = ({ counts }) => {
-  const allowCount = counts?.allowed ?? 2976;
-  const reviewCount = counts?.review ?? 437;
-  const blockCount = counts?.blocked ?? 429;
-  const total = allowCount + reviewCount + blockCount || 3842;
+  const allowCount = counts?.allowed ?? 0;
+  const reviewCount = counts?.review ?? 0;
+  const blockCount = counts?.blocked ?? 0;
+  const total = allowCount + reviewCount + blockCount;
 
-  const allowPct = Number(((allowCount / total) * 100).toFixed(1));
-  const reviewPct = Number(((reviewCount / total) * 100).toFixed(1));
-  const blockPct = Number(Math.max(0, 100 - allowPct - reviewPct).toFixed(1));
+  const allowPct = total > 0 ? Number(((allowCount / total) * 100).toFixed(1)) : 0;
+  const reviewPct = total > 0 ? Number(((reviewCount / total) * 100).toFixed(1)) : 0;
+  const blockPct = total > 0 ? Number(Math.max(0, 100 - allowPct - reviewPct).toFixed(1)) : 0;
 
   const circumference = 276.4;
-  const allowLen = Number(((allowPct / 100) * circumference).toFixed(1));
-  const reviewLen = Number(((reviewPct / 100) * circumference).toFixed(1));
-  const blockLen = Number(((blockPct / 100) * circumference).toFixed(1));
+  const allowLen = total > 0 ? Number(((allowPct / 100) * circumference).toFixed(1)) : 0;
+  const reviewLen = total > 0 ? Number(((reviewPct / 100) * circumference).toFixed(1)) : 0;
+  const blockLen = total > 0 ? Number(((blockPct / 100) * circumference).toFixed(1)) : 0;
 
   const items = [
     { label: 'Allowed', percentage: allowPct, count: allowCount, color: '#22c55e' },

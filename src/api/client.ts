@@ -413,8 +413,8 @@ export class ApiClient {
     return this.request<ApiRiskFactorsResponse>('/api/risk/factors');
   }
 
-  async getAgents(): Promise<{ paused_agents: string[] }> {
-    return this.request<{ paused_agents: string[] }>('/api/incident/agents');
+  async getAgents(): Promise<{ paused_agents: string[]; agents?: Array<{ name: string; status: string; is_paused: boolean; total_events: number; blocked_count: number; last_active: string | null }> }> {
+    return this.request<{ paused_agents: string[]; agents?: Array<{ name: string; status: string; is_paused: boolean; total_events: number; blocked_count: number; last_active: string | null }> }>('/api/incident/agents');
   }
 
   async pauseAgent(agent: string): Promise<{ agent: string; status: string }> {

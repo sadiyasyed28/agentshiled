@@ -3,11 +3,41 @@ import { PixelSparkline } from '../pixel/PixelSparkline';
 import { PixelLayersIcon } from '../pixel/PixelIcons';
 import { AnimatedNumber } from '../pixel/AnimatedNumber';
 
-export const EventsKpiSection: React.FC = () => {
-  // Sparkline historical trends matching IMAGE 2
-  const allowedTrend = [18, 22, 19, 28, 24, 32, 29, 36, 42, 38, 45, 52];
-  const reviewTrend = [12, 16, 22, 18, 24, 15, 26, 32, 28, 35, 30, 34];
-  const blockedTrend = [8, 12, 10, 16, 14, 20, 18, 24, 21, 28, 25, 30];
+interface EventsKpiSectionProps {
+  events?: { decision: string }[];
+  stats?: {
+    total?: number;
+    allowed?: number;
+    review?: number;
+    blocked?: number;
+  } | null;
+}
+
+export const EventsKpiSection: React.FC<EventsKpiSectionProps> = ({ events, stats }) => {
+  const derivedTotal = events ? events.length : (stats?.total ?? 0);
+  const derivedAllowed = events
+    ? events.filter((e) => e.decision === 'Allowed' || e.decision === 'ALLOW').length
+    : (stats?.allowed ?? 0);
+  const derivedReview = events
+    ? events.filter((e) => e.decision === 'Review' || e.decision === 'REVIEW').length
+    : (stats?.review ?? 0);
+  const derivedBlocked = events
+    ? events.filter((e) => e.decision === 'Blocked' || e.decision === 'BLOCK').length
+    : (stats?.blocked ?? 0);
+
+  const total = derivedTotal;
+  const allowed = derivedAllowed;
+  const review = derivedReview;
+  const blocked = derivedBlocked;
+
+  const hasActivity = total > 0;
+  const allowPct = hasActivity ? Number(((allowed / total) * 100).toFixed(1)) : 0;
+  const reviewPct = hasActivity ? Number(((review / total) * 100).toFixed(1)) : 0;
+  const blockPct = hasActivity ? Number(((blocked / total) * 100).toFixed(1)) : 0;
+
+  const allowedTrend = hasActivity ? [Math.max(0, allowed - 2), allowed, allowed] : [0, 0, 0];
+  const reviewTrend = hasActivity ? [Math.max(0, review - 1), review, review] : [0, 0, 0];
+  const blockedTrend = hasActivity ? [Math.max(0, blocked - 1), blocked, blocked] : [0, 0, 0];
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 mb-3.5">
@@ -29,7 +59,7 @@ export const EventsKpiSection: React.FC = () => {
 
           <div className="mt-2.5">
             <div className="text-[26px] font-bold text-white tracking-tight leading-none font-mono">
-              <AnimatedNumber value={3842} />
+              <AnimatedNumber value={total} />
             </div>
             <div className="text-xs font-medium text-[#9c96c9] mt-1">
               Total Events
@@ -57,14 +87,14 @@ export const EventsKpiSection: React.FC = () => {
 
             {/* Top Right Percentage Badge */}
             <div className="px-2 py-0.5 rounded-md bg-[#1d1a3d] border border-[#39326b] text-[#a59ecd] text-xs font-semibold">
-              <AnimatedNumber value={77.5} decimals={1} suffix="%" />
+              <AnimatedNumber value={allowPct} decimals={1} suffix="%" />
             </div>
           </div>
 
           <div className="flex items-end justify-between mt-2.5 relative z-10">
             <div>
               <div className="text-[26px] font-bold text-white tracking-tight leading-none font-mono">
-                <AnimatedNumber value={2976} />
+                <AnimatedNumber value={allowed} />
               </div>
               <div className="text-xs font-medium text-[#9c96c9] mt-1">
                 Allowed
@@ -95,14 +125,14 @@ export const EventsKpiSection: React.FC = () => {
 
             {/* Top Right Percentage Badge */}
             <div className="px-2 py-0.5 rounded-md bg-[#1d1a3d] border border-[#39326b] text-[#a59ecd] text-xs font-semibold">
-              <AnimatedNumber value={11.4} decimals={1} suffix="%" />
+              <AnimatedNumber value={reviewPct} decimals={1} suffix="%" />
             </div>
           </div>
 
           <div className="flex items-end justify-between mt-2.5 relative z-10">
             <div>
               <div className="text-[26px] font-bold text-white tracking-tight leading-none font-mono">
-                <AnimatedNumber value={437} />
+                <AnimatedNumber value={review} />
               </div>
               <div className="text-xs font-medium text-[#9c96c9] mt-1">
                 Review
@@ -136,14 +166,14 @@ export const EventsKpiSection: React.FC = () => {
 
             {/* Top Right Percentage Badge */}
             <div className="px-2 py-0.5 rounded-md bg-[#1d1a3d] border border-[#39326b] text-[#a59ecd] text-xs font-semibold">
-              <AnimatedNumber value={11.2} decimals={1} suffix="%" />
+              <AnimatedNumber value={blockPct} decimals={1} suffix="%" />
             </div>
           </div>
 
           <div className="flex items-end justify-between mt-2.5 relative z-10">
             <div>
               <div className="text-[26px] font-bold text-white tracking-tight leading-none font-mono">
-                <AnimatedNumber value={429} />
+                <AnimatedNumber value={blocked} />
               </div>
               <div className="text-xs font-medium text-[#9c96c9] mt-1">
                 Blocked

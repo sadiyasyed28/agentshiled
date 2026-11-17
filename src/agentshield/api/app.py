@@ -9,12 +9,14 @@ Endpoints:
   GET  /events
 """
 
+import hashlib
 import hmac
 import os
 import re
 import secrets
 import tempfile
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,7 +75,22 @@ from agentshield.api.schemas import (
     RiskFactorItem,
     SeverityThresholds,
     RiskFactorsResponse,
+    TelemetryIngestRequest,
+    TelemetryIngestResponse,
     RuntimeConfigResponse,
+    RegisterTenantRequest,
+    RegisterTenantResponse,
+    ApiKeyItem,
+    ApiKeysListResponse,
+    CreateApiKeyRequest,
+    ApiKeyCreatedResponse,
+    RotateApiKeyRequest,
+    TenantMeResponse,
+)
+from agentshield.storage.tenants import (
+    TenantStore,
+    TenantAlreadyExistsError,
+    KeyNotFoundError,
 )
 from agentshield.observability import (
     sanitize_correlation_id,
@@ -129,13 +146,15 @@ def create_app(
     reports_db_path: Optional[str] = None,
     sessions_db_path: Optional[str] = None,
     simulation_db_path: Optional[str] = None,
+    tenants_db_path: Optional[str] = None,
     event_store: Optional[Any] = None,
     report_store: Optional[Any] = None,
+    tenant_store: Optional[Any] = None,
     analyst: Optional[SecurityAnalyst] = None,
     llm_provider: Optional[LLMProvider] = None,
     simulator: Optional[SimulatorService] = None,
 ) -> FastAPI:
-    app = FastAPI(title="AgentShield API", version="0.1.0")
+    app = FastAPI(title="AgentShield API", version="0.2.0")
 
     # Request size limiter & correlation tracking middleware
     app.add_middleware(CorrelationMiddleware)
@@ -191,6 +210,7 @@ def create_app(
     is_read_only = read_only if read_only is not None else (
         (os.environ.get("AGENTSHIELD_READONLY") or os.environ.get("AGENTSHIELD_READ_ONLY") or "false").lower() in ("true", "1", "yes")
     )
+    _seen_telemetry_ids: Dict[str, Set[str]] = {}
 
     # Instantiate StoreBundle based on environment (SQLite default, PostgreSQL if configured)
     stores = create_stores(
@@ -200,6 +220,7 @@ def create_app(
         reports_db_path=reports_db_path,
         sessions_db_path=sessions_db_path,
         simulation_db_path=simulation_db_path,
+        tenants_db_path=tenants_db_path,
     )
 
     audit_store = stores.audit_store
@@ -216,6 +237,7 @@ def create_app(
     simulation_store = stores.simulation_store
     sim_review_store = stores.sim_review_store
     sim_event_store = stores.sim_event_store
+    tenant_store = stores.tenant_store if tenant_store is None else tenant_store
 
     session_secret = os.environ.get("AGENTSHIELD_SESSION_SECRET")
     session_manager = (
@@ -224,7 +246,7 @@ def create_app(
             store=session_store,
             session_secret=session_secret,
         )
-        if (configured_admin_key or configured_tenant_keys)
+        if (configured_admin_key or configured_tenant_keys or tenant_store)
         else None
     )
 
@@ -328,6 +350,7 @@ def create_app(
     app.state.session_manager = session_manager
     app.state.simulation_store = simulation_store
     app.state.simulator = simulator_service
+    app.state.tenant_store = tenant_store
     app.state.event_manager = getattr(shield, "event_manager", None)
     app.state.sim_event_manager = getattr(sim_shield, "event_manager", None)
     app.state.analyst = security_analyst
@@ -433,7 +456,31 @@ def create_app(
                         )
                     return AuthContext(user_id=f"tenant_admin_{t_id}", tenant_id=t_id, role="tenant_admin")
 
-        # 3. Secure signed cookie session
+        # 3. Dynamic database-backed tenant API key lookup
+        if auth_header and tenant_store:
+            key_hash = hashlib.sha256(auth_header.encode("utf-8")).hexdigest()
+            key_rec = tenant_store.get_key_by_hash(key_hash)
+            if key_rec:
+                if not key_rec.is_active:
+                    raise HTTPException(status_code=401, detail="Unauthorized: API key has been revoked")
+                tenant_store.touch_key(key_rec.key_id)
+                if requested_tenant_header and requested_tenant_header != key_rec.tenant_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Forbidden: Key belongs to tenant '{key_rec.tenant_id}', cannot access tenant '{requested_tenant_header}'.",
+                    )
+                return AuthContext(user_id=f"api_key_{key_rec.key_id}", tenant_id=key_rec.tenant_id, role="tenant_admin")
+
+        # If an explicit authorization header was supplied but failed to authenticate, fail closed
+        if auth_header:
+            if request.headers.get("x-admin-key") and not configured_admin_key and not configured_tenant_keys:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Forbidden: Admin endpoints are disabled because AGENTSHIELD_ADMIN_KEY is not configured",
+                )
+            raise HTTPException(status_code=401, detail="Unauthorized: Invalid administrative credentials")
+
+        # 4. Secure signed cookie session (only when no header is supplied)
         session_token = request.cookies.get("agentshield_session")
         if session_token and session_manager:
             payload = session_manager.verify_token(session_token)
@@ -454,7 +501,7 @@ def create_app(
                     role=role,
                 )
 
-        if not configured_admin_key and not configured_tenant_keys:
+        if not configured_admin_key and not configured_tenant_keys and not tenant_store:
             raise HTTPException(
                 status_code=403,
                 detail="Forbidden: Admin endpoints are disabled because AGENTSHIELD_ADMIN_KEY is not configured",
@@ -545,20 +592,40 @@ def create_app(
         matched_role = None
         matched_user = None
 
-        if configured_admin_key and hmac.compare_digest(req.admin_key, configured_admin_key):
-            matched_role = "global_admin"
-            matched_user = "admin"
-        elif configured_tenant_keys:
-            for t_id, t_key in configured_tenant_keys.items():
-                if hmac.compare_digest(req.admin_key, t_key):
-                    if req.tenant_id and req.tenant_id != t_id:
-                        raise HTTPException(status_code=403, detail=f"Forbidden: Key does not match requested tenant '{req.tenant_id}'")
-                    target_tenant = t_id
+        if req.email and req.password and tenant_store:
+            tenant = tenant_store.authenticate_tenant(req.email, req.password)
+            if not tenant:
+                raise HTTPException(status_code=401, detail="Unauthorized: Invalid email or password")
+            target_tenant = tenant.tenant_id
+            matched_role = "tenant_admin"
+            matched_user = f"user_{tenant.tenant_id}"
+        elif req.admin_key:
+            if configured_admin_key and hmac.compare_digest(req.admin_key, configured_admin_key):
+                matched_role = "global_admin"
+                matched_user = "admin"
+            elif configured_tenant_keys:
+                for t_id, t_key in configured_tenant_keys.items():
+                    if hmac.compare_digest(req.admin_key, t_key):
+                        if req.tenant_id and req.tenant_id != t_id:
+                            raise HTTPException(status_code=403, detail=f"Forbidden: Key does not match requested tenant '{req.tenant_id}'")
+                        target_tenant = t_id
+                        matched_role = "tenant_admin"
+                        matched_user = f"admin_{t_id}"
+                        break
+            elif tenant_store:
+                key_hash = hashlib.sha256(req.admin_key.encode("utf-8")).hexdigest()
+                key_rec = tenant_store.get_key_by_hash(key_hash)
+                if key_rec and key_rec.is_active:
+                    target_tenant = key_rec.tenant_id
                     matched_role = "tenant_admin"
-                    matched_user = f"admin_{t_id}"
-                    break
+                    matched_user = f"api_key_{key_rec.key_id}"
 
         if not matched_role:
+            if req.admin_key and not configured_admin_key and not configured_tenant_keys:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Forbidden: Admin authentication is disabled because AGENTSHIELD_ADMIN_KEY is not configured",
+                )
             if not configured_admin_key and not configured_tenant_keys:
                 raise HTTPException(
                     status_code=403,
@@ -604,6 +671,175 @@ def create_app(
             "role": matched_role,
         }
 
+    @app.post("/api/auth/register", response_model=RegisterTenantResponse)
+    def auth_register(req: RegisterTenantRequest, request: Request, response: Response):
+        _check_mutation_allowed()
+        _check_public_rate_limit(request, max_requests=10, window_seconds=60)
+
+        if not tenant_store:
+            raise HTTPException(status_code=500, detail="Tenant store not initialized")
+
+        try:
+            tenant = tenant_store.create_tenant(
+                name=req.name,
+                email=req.email,
+                password=req.password,
+                tenant_id=req.tenant_id,
+            )
+        except TenantAlreadyExistsError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # Generate initial API key for the new workspace
+        key_rec, plaintext_key = tenant_store.create_api_key(
+            tenant_id=tenant.tenant_id,
+            name="Default SDK Key",
+            prefix="ash_live",
+        )
+
+        csrf_token = None
+        if session_manager:
+            token, _ = session_manager.create_session(
+                user_id=f"user_{tenant.tenant_id}",
+                tenant_id=tenant.tenant_id,
+                role="tenant_admin",
+            )
+            csrf_token = secrets.token_hex(24)
+            response.set_cookie(
+                key="agentshield_session",
+                value=token,
+                httponly=True,
+                samesite="lax",
+                secure=is_production,
+                path="/",
+                max_age=86400,
+            )
+            response.set_cookie(
+                key="agentshield_csrf",
+                value=csrf_token,
+                httponly=False,
+                samesite="lax",
+                secure=is_production,
+                path="/",
+                max_age=86400,
+            )
+
+        return RegisterTenantResponse(
+            status="created",
+            tenant_id=tenant.tenant_id,
+            name=tenant.name,
+            email=tenant.owner_email,
+            api_key=plaintext_key,
+            key_id=key_rec.key_id,
+            masked_key=key_rec.masked,
+            csrf_token=csrf_token,
+            created_at=tenant.created_at,
+        )
+
+    @app.get("/api/api-keys", response_model=ApiKeysListResponse)
+    def get_api_keys(request: Request):
+        auth_ctx = _verify_admin(request)
+        if not tenant_store:
+            raise HTTPException(status_code=500, detail="Tenant store not initialized")
+        target_tenant = _resolve_tenant_id(auth_ctx, request.query_params.get("tenant_id"))
+        keys = tenant_store.list_api_keys(target_tenant)
+        items = [
+            ApiKeyItem(
+                key_id=k.key_id,
+                tenant_id=k.tenant_id,
+                name=k.name,
+                prefix=k.prefix,
+                last_four=k.last_four,
+                masked_key=k.masked,
+                created_at=k.created_at,
+                revoked_at=k.revoked_at,
+                last_used_at=k.last_used_at,
+                is_active=k.is_active,
+            )
+            for k in keys
+        ]
+        return ApiKeysListResponse(keys=items, total=len(items))
+
+    @app.post("/api/api-keys", response_model=ApiKeyCreatedResponse)
+    def post_api_key(req: CreateApiKeyRequest, request: Request):
+        _check_mutation_allowed()
+        auth_ctx = _verify_admin(request)
+        if not tenant_store:
+            raise HTTPException(status_code=500, detail="Tenant store not initialized")
+        target_tenant = _resolve_tenant_id(auth_ctx, getattr(req, "tenant_id", None))
+        try:
+            key_rec, plaintext_key = tenant_store.create_api_key(
+                tenant_id=target_tenant,
+                name=req.name,
+                prefix=req.prefix,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        return ApiKeyCreatedResponse(
+            status="created",
+            key_id=key_rec.key_id,
+            tenant_id=key_rec.tenant_id,
+            name=key_rec.name,
+            masked_key=key_rec.masked,
+            api_key=plaintext_key,
+            created_at=key_rec.created_at,
+        )
+
+    @app.post("/api/api-keys/{key_id}/revoke")
+    def post_revoke_api_key(key_id: str, request: Request):
+        _check_mutation_allowed()
+        auth_ctx = _verify_admin(request)
+        if not tenant_store:
+            raise HTTPException(status_code=500, detail="Tenant store not initialized")
+        target_tenant = auth_ctx.tenant_id
+        revoked = tenant_store.revoke_api_key(tenant_id=target_tenant, key_id=key_id)
+        if not revoked:
+            raise HTTPException(status_code=404, detail=f"API key '{key_id}' not found or already revoked")
+        return {"status": "revoked", "key_id": key_id, "tenant_id": target_tenant}
+
+    @app.post("/api/api-keys/{key_id}/rotate", response_model=ApiKeyCreatedResponse)
+    def post_rotate_api_key(key_id: str, request: Request, req: Optional[RotateApiKeyRequest] = None):
+        _check_mutation_allowed()
+        auth_ctx = _verify_admin(request)
+        if not tenant_store:
+            raise HTTPException(status_code=500, detail="Tenant store not initialized")
+        target_tenant = auth_ctx.tenant_id
+        try:
+            new_key_rec, plaintext_key = tenant_store.rotate_api_key(
+                tenant_id=target_tenant,
+                key_id=key_id,
+                name=req.name if req else None,
+            )
+        except KeyNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        return ApiKeyCreatedResponse(
+            status="rotated",
+            key_id=new_key_rec.key_id,
+            tenant_id=new_key_rec.tenant_id,
+            name=new_key_rec.name,
+            masked_key=new_key_rec.masked,
+            api_key=plaintext_key,
+            created_at=new_key_rec.created_at,
+        )
+
+    @app.get("/api/tenant/me", response_model=TenantMeResponse)
+    def get_current_tenant(request: Request):
+        auth_ctx = _verify_admin(request)
+        if not tenant_store:
+            raise HTTPException(status_code=500, detail="Tenant store not initialized")
+        tenant = tenant_store.get_tenant(auth_ctx.tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail=f"Tenant '{auth_ctx.tenant_id}' not found")
+        return TenantMeResponse(
+            tenant_id=tenant.tenant_id,
+            name=tenant.name,
+            owner_email=tenant.owner_email,
+            created_at=tenant.created_at,
+        )
+
     @app.post("/api/auth/logout")
     def auth_logout(request: Request, response: Response):
         token = request.cookies.get("agentshield_session")
@@ -637,7 +873,7 @@ def create_app(
             return AuthSessionResponse(
                 authenticated=False,
                 read_only=is_read_only,
-                admin_configured=bool(configured_admin_key or configured_tenant_keys),
+                admin_configured=bool(configured_admin_key or configured_tenant_keys or tenant_store),
                 expires_at=None,
                 csrf_token=None,
                 tenant_id="default",
@@ -645,6 +881,7 @@ def create_app(
             )
 
     # Overview & Statistics Endpoint (tenant-isolated live summary)
+    @app.get("/overview", response_model=OverviewStatsResponse)
     @app.get("/api/overview", response_model=OverviewStatsResponse)
     @app.get("/api/stats", response_model=OverviewStatsResponse)
     def get_overview_stats(request: Request, tenant_id: Optional[str] = None):
@@ -688,7 +925,7 @@ def create_app(
     def health():
         return HealthResponse(
             status="healthy",
-            version="0.1.0",
+            version="0.2.0",
             engine="AgentShield Runtime",
             read_only=is_read_only,
         )
@@ -975,10 +1212,125 @@ def create_app(
                 correlation_id=r.correlation_id,
                 trace_id=r.trace_id,
                 tenant_id=r.tenant_id,
+                event_id=getattr(r, "event_id", None),
             )
             for r in records
         ]
         return EventsResponse(events=items, total=len(items))
+
+    @app.post("/api/telemetry/events", response_model=TelemetryIngestResponse)
+    @app.post("/api/v1/telemetry/events", response_model=TelemetryIngestResponse)
+    def ingest_telemetry_events(req: TelemetryIngestRequest, request: Request):
+        auth_ctx = _verify_admin(request)
+        effective_tenant = _resolve_tenant_id(auth_ctx, req.tenant_id)
+
+        ingested = 0
+        duplicates = 0
+
+        for item in req.events:
+            # 1. Unique event_id generation: never use correlation_id alone as deduplication key
+            evt_id = item.event_id or f"evt_{uuid.uuid4().hex}"
+
+            # 2. In-memory fast filter
+            tenant_seen = _seen_telemetry_ids.setdefault(effective_tenant, set())
+            if evt_id in tenant_seen:
+                duplicates += 1
+                continue
+
+            # 3. Database-backed deduplication pre-check
+            if hasattr(audit_store, "has_event") and audit_store.has_event(effective_tenant, evt_id):
+                tenant_seen.add(evt_id)
+                duplicates += 1
+                continue
+
+            clean_args = redact_sensitive_data(item.arguments)
+            clean_err = redact_sensitive_data(item.error) if item.error else None
+
+            from agentshield.models import Decision, DecisionValue, RiskLevel
+            try:
+                dec_val = DecisionValue(item.decision.upper())
+            except Exception:
+                dec_val = DecisionValue.BLOCK
+
+            try:
+                risk_lvl = RiskLevel(item.severity.upper())
+            except Exception:
+                risk_lvl = RiskLevel.LOW
+
+            # Correlation ID is strictly preserved for linking related events
+            corr_id = item.correlation_id
+            trc_id = item.trace_id
+
+            dec = Decision(
+                decision=dec_val,
+                reasons=item.reasons or [f"Remote event {item.decision}"],
+                risk_score=float(item.risk_score),
+                severity=risk_lvl,
+                agent=item.agent,
+                tool=item.tool,
+                allowed=bool(item.allowed),
+                arguments=clean_args,
+                correlation_id=corr_id,
+                trace_id=trc_id,
+            )
+
+            # 4. Atomic persistence to audit_store with database-level uniqueness enforcement
+            from agentshield.audit.store import DuplicateEventError
+            try:
+                audit_store.log_decision(
+                    decision=dec,
+                    arguments=clean_args,
+                    execution_status=item.execution_status,
+                    error=clean_err,
+                    policy_version_hash=item.policy_version_hash,
+                    correlation_id=corr_id,
+                    trace_id=trc_id,
+                    tenant_id=effective_tenant,
+                    timestamp=item.timestamp,
+                    event_id=evt_id,
+                )
+            except DuplicateEventError:
+                tenant_seen.add(evt_id)
+                duplicates += 1
+                continue
+
+            tenant_seen.add(evt_id)
+            if len(tenant_seen) > 20000:
+                # Evict oldest elements rather than wiping entire cache
+                to_remove = len(tenant_seen) - 10000
+                for old_id in list(tenant_seen)[:to_remove]:
+                    tenant_seen.discard(old_id)
+
+            # Persist to event_manager if available (populates security incidents and alerts)
+            if getattr(shield, "event_manager", None):
+                try:
+                    from agentshield.events import EventType, EventSeverity
+                    shield.event_manager.publish_event(
+                        agent_id=item.agent,
+                        tool=item.tool,
+                        event_type=item.event_type or EventType.AUTHORIZATION_DECISION.value,
+                        severity=item.severity or EventSeverity.LOW.value,
+                        decision=item.decision,
+                        risk_score=item.risk_score,
+                        evidence=item.reasons,
+                        trace_id=trc_id,
+                        correlation_id=corr_id,
+                        metadata=item.metadata or {},
+                        tenant_id=effective_tenant,
+                        timestamp=item.timestamp,
+                        event_id=evt_id,
+                    )
+                except Exception:
+                    pass
+
+            ingested += 1
+
+        return TelemetryIngestResponse(
+            status="accepted",
+            ingested=ingested,
+            duplicates=duplicates,
+            tenant_id=effective_tenant,
+        )
 
     @app.get("/api/events", response_model=EventsResponse)
     @app.get("/api/audit/events", response_model=EventsResponse)
@@ -1022,6 +1374,7 @@ def create_app(
                 correlation_id=r.correlation_id,
                 trace_id=r.trace_id,
                 tenant_id=r.tenant_id,
+                event_id=getattr(r, "event_id", None),
             )
             for r in records
         ]
@@ -1076,6 +1429,8 @@ def create_app(
 
     @app.get("/incident/agents")
     @app.get("/api/incident/agents")
+    @app.get("/agents")
+    @app.get("/api/agents")
     def list_agents(request: Request, tenant_id: Optional[str] = None):
         auth_ctx = _get_optional_auth(request)
         if not auth_ctx:
@@ -1084,7 +1439,98 @@ def create_app(
             effective_tenant = "default"
         else:
             effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
-        return {"paused_agents": sorted(list(shield.get_paused_agents(tenant_id=effective_tenant)))}
+
+        paused_set = set(shield.get_paused_agents(tenant_id=effective_tenant))
+        discovered = audit_store.get_discovered_agents(tenant_id=effective_tenant)
+
+        agents = []
+        seen = set()
+        for d in discovered:
+            name = d["agent"]
+            seen.add(name)
+            is_paused = name in paused_set
+            agents.append({
+                "name": name,
+                "status": "paused" if is_paused else "active",
+                "is_paused": is_paused,
+                "total_events": d["total_events"],
+                "blocked_count": d["blocked_count"],
+                "last_active": d["last_active"],
+            })
+        for p in sorted(list(paused_set)):
+            if p not in seen:
+                agents.append({
+                    "name": p,
+                    "status": "paused",
+                    "is_paused": True,
+                    "total_events": 0,
+                    "blocked_count": 0,
+                    "last_active": None,
+                })
+
+        return {
+            "agents": agents,
+            "paused_agents": sorted(list(paused_set)),
+            "total": len(agents),
+            "tenant_id": effective_tenant,
+        }
+
+    @app.get("/api/telemetry/status")
+    @app.get("/api/telemetry/health")
+    def get_telemetry_status(request: Request, tenant_id: Optional[str] = None):
+        auth_ctx = _get_optional_auth(request)
+        if not auth_ctx:
+            if tenant_id and tenant_id != "default":
+                raise HTTPException(status_code=401, detail="Unauthorized: Authentication required to access tenant data")
+            effective_tenant = "default"
+        else:
+            effective_tenant = _resolve_tenant_id(auth_ctx, tenant_id)
+
+        storage_healthy = True
+        storage_error = None
+        try:
+            discovered = audit_store.get_discovered_agents(tenant_id=effective_tenant)
+            total_events = sum(d["total_events"] for d in discovered)
+            records = audit_store.query(limit=1, tenant_id=effective_tenant)
+            last_event_time = records[0].timestamp if records else None
+        except Exception as e:
+            storage_healthy = False
+            storage_error = str(e)
+            discovered = []
+            total_events = 0
+            records = []
+            last_event_time = None
+
+        exporter_stats = shield.get_telemetry_stats() if hasattr(shield, "get_telemetry_stats") else {}
+        dropped = exporter_stats.get("dropped", 0)
+        pending = exporter_stats.get("pending_queue", 0) + exporter_stats.get("pending_spool", 0)
+        exporter_error = exporter_stats.get("last_error")
+        last_tx = exporter_stats.get("last_successful_transmission") or last_event_time
+
+        is_healthy = storage_healthy and (exporter_error is None)
+
+        if not storage_healthy:
+            status = "degraded"
+        elif total_events > 0:
+            status = "connected"
+        else:
+            status = "awaiting_telemetry"
+
+        return {
+            "status": status,
+            "tenant_id": effective_tenant,
+            "total_events": total_events,
+            "active_agents_count": len(discovered),
+            "last_event_timestamp": last_event_time,
+            "last_successful_transmission": last_tx,
+            "pending_delivery": pending,
+            "dropped_events": dropped,
+            "backend_exporter_pending": pending,
+            "backend_exporter_dropped": dropped,
+            "healthy": is_healthy,
+            "storage_healthy": storage_healthy,
+            "storage_error": storage_error,
+        }
 
     @app.get("/policies", response_model=PoliciesResponse)
     @app.get("/api/policies", response_model=PoliciesResponse)
@@ -1235,6 +1681,8 @@ def create_app(
         elif source == "simulation":
             return {"reviews": sim_reviews, "count": len(sim_reviews)}
         else:
+            if auth_ctx.role == "tenant_admin" and effective_tenant != "default":
+                return {"reviews": prod_reviews, "count": len(prod_reviews)}
             combined = prod_reviews + sim_reviews
             return {"reviews": combined, "count": len(combined)}
 

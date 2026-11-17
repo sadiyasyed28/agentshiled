@@ -26,7 +26,7 @@ async def test_health_endpoint(test_app):
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "healthy"
-        assert data["version"] == "0.1.0"
+        assert data["version"] == "0.2.0"
 
 @pytest.mark.anyio
 async def test_check_endpoint_clean_and_malicious(test_app):
@@ -394,11 +394,11 @@ async def test_incident_agents_public_read_and_protected_mutations():
         # 1. Both GET routes work unauthenticated and return empty paused_agents list initially
         res_get_1 = await client.get("/incident/agents")
         assert res_get_1.status_code == 200
-        assert res_get_1.json() == {"paused_agents": []}
+        assert res_get_1.json()["paused_agents"] == []
 
         res_get_2 = await client.get("/api/incident/agents")
         assert res_get_2.status_code == 200
-        assert res_get_2.json() == {"paused_agents": []}
+        assert res_get_2.json()["paused_agents"] == []
 
         # 2. Pause mutation without admin credentials fails with 401
         res_pause_unauth = await client.post("/incident/pause", json={"agent": "shopping_agent"})
@@ -423,11 +423,11 @@ async def test_incident_agents_public_read_and_protected_mutations():
         # 5. Both unauthenticated GET routes now return the updated paused_agents list
         res_get_paused_1 = await client.get("/incident/agents")
         assert res_get_paused_1.status_code == 200
-        assert res_get_paused_1.json() == {"paused_agents": ["shopping_agent"]}
+        assert res_get_paused_1.json()["paused_agents"] == ["shopping_agent"]
 
         res_get_paused_2 = await client.get("/api/incident/agents")
         assert res_get_paused_2.status_code == 200
-        assert res_get_paused_2.json() == {"paused_agents": ["shopping_agent"]}
+        assert res_get_paused_2.json()["paused_agents"] == ["shopping_agent"]
 
         # 6. Authenticated unpause mutation succeeds
         res_unpause_auth = await client.post("/incident/unpause", json={"agent": "shopping_agent"}, headers=headers)
@@ -437,7 +437,7 @@ async def test_incident_agents_public_read_and_protected_mutations():
         # 7. Paused agents list reflects unpaused state
         res_get_unpaused = await client.get("/api/incident/agents")
         assert res_get_unpaused.status_code == 200
-        assert res_get_unpaused.json() == {"paused_agents": []}
+        assert res_get_unpaused.json()["paused_agents"] == []
 
     # 8. Verify read-only mode prevents mutations even with valid admin credentials
     app_ro = create_app(audit_db_path=":memory:", admin_api_key=admin_key, read_only=True)

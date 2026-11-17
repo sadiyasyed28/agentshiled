@@ -144,6 +144,78 @@ export interface ApiSessionResponse {
   authenticated: boolean;
   expires_at: number | null;
   csrf_token?: string | null;
+  tenant_id?: string;
+  role?: string;
+}
+
+export interface ApiKeyItem {
+  key_id: string;
+  tenant_id: string;
+  name: string;
+  prefix: string;
+  last_four: string;
+  masked_key: string;
+  created_at: number;
+  revoked_at?: number | null;
+  last_used_at?: number | null;
+  is_active: boolean;
+}
+
+export interface ApiRegisterResponse {
+  status: string;
+  tenant_id: string;
+  name: string;
+  email: string;
+  api_key: string;
+  key_id: string;
+  masked_key: string;
+  csrf_token?: string | null;
+  created_at: number;
+}
+
+export interface ApiCreatedKeyResponse {
+  status: string;
+  key_id: string;
+  tenant_id: string;
+  name: string;
+  masked_key: string;
+  api_key: string;
+  created_at: number;
+}
+
+export interface ApiTenantInfo {
+  tenant_id: string;
+  name: string;
+  owner_email: string;
+  created_at: number;
+}
+
+export interface ApiDiscoveredAgent {
+  name: string;
+  status: "active" | "paused";
+  is_paused: boolean;
+  total_events: number;
+  blocked_count: number;
+  last_active: string | null;
+}
+
+export interface ApiAgentsResponse {
+  agents: ApiDiscoveredAgent[];
+  paused_agents: string[];
+  total: number;
+  tenant_id?: string;
+}
+
+export interface ApiTelemetryStatusResponse {
+  status: "connected" | "awaiting_telemetry";
+  tenant_id: string;
+  total_events: number;
+  active_agents_count: number;
+  last_event_timestamp: string | null;
+  last_successful_transmission: string | null;
+  pending_delivery: number;
+  dropped_events: number;
+  healthy: boolean;
 }
 
 export interface ApiAuditVerifyResponse {
@@ -321,6 +393,8 @@ export class ApiClient {
       authenticated: boolean;
       expires_at?: number | null;
       csrf_token?: string | null;
+      tenant_id?: string;
+      role?: string;
     }>("/api/auth/session");
     if (res.csrf_token) {
       this.csrfToken = res.csrf_token;
@@ -329,17 +403,26 @@ export class ApiClient {
       authenticated: res.authenticated,
       expires_at: res.expires_at ?? null,
       csrf_token: res.csrf_token ?? null,
+      tenant_id: res.tenant_id,
+      role: res.role,
     };
   }
 
-  async login(adminKey: string): Promise<ApiSessionResponse> {
+  async login(adminKey?: string, email?: string, password?: string): Promise<ApiSessionResponse> {
+    const body: Record<string, string> = {};
+    if (adminKey) body.admin_key = adminKey;
+    if (email) body.email = email;
+    if (password) body.password = password;
+
     const res = await this.request<{
       authenticated: boolean;
       expires_at?: number | null;
       csrf_token?: string | null;
+      tenant_id?: string;
+      role?: string;
     }>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ admin_key: adminKey }),
+      body: JSON.stringify(body),
     });
     if (res.csrf_token) {
       this.csrfToken = res.csrf_token;
@@ -348,7 +431,59 @@ export class ApiClient {
       authenticated: res.authenticated,
       expires_at: res.expires_at ?? null,
       csrf_token: res.csrf_token ?? null,
+      tenant_id: res.tenant_id,
+      role: res.role,
     };
+  }
+
+  async register(
+    name: string,
+    email: string,
+    password: string,
+    tenantId?: string
+  ): Promise<ApiRegisterResponse> {
+    const res = await this.request<ApiRegisterResponse>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        email,
+        password,
+        tenant_id: tenantId || null,
+      }),
+    });
+    if (res.csrf_token) {
+      this.csrfToken = res.csrf_token;
+    }
+    return res;
+  }
+
+  async getApiKeys(tenantId?: string): Promise<{ keys: ApiKeyItem[]; total: number }> {
+    const q = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : "";
+    return this.request<{ keys: ApiKeyItem[]; total: number }>(`/api/api-keys${q}`);
+  }
+
+  async createApiKey(name: string = "Default Key", prefix: string = "ash_live"): Promise<ApiCreatedKeyResponse> {
+    return this.request<ApiCreatedKeyResponse>("/api/api-keys", {
+      method: "POST",
+      body: JSON.stringify({ name, prefix }),
+    });
+  }
+
+  async revokeApiKey(keyId: string): Promise<{ status: string; key_id: string }> {
+    return this.request<{ status: string; key_id: string }>(`/api/api-keys/${encodeURIComponent(keyId)}/revoke`, {
+      method: "POST",
+    });
+  }
+
+  async rotateApiKey(keyId: string, name?: string): Promise<ApiCreatedKeyResponse> {
+    return this.request<ApiCreatedKeyResponse>(`/api/api-keys/${encodeURIComponent(keyId)}/rotate`, {
+      method: "POST",
+      body: JSON.stringify({ name: name || null }),
+    });
+  }
+
+  async getTenantMe(): Promise<ApiTenantInfo> {
+    return this.request<ApiTenantInfo>("/api/tenant/me");
   }
 
   async logout(): Promise<ApiSessionResponse> {
@@ -431,6 +566,16 @@ export class ApiClient {
 
   async getPausedAgents(): Promise<{ paused_agents: string[] }> {
     return this.request<{ paused_agents: string[] }>("/incident/agents");
+  }
+
+  async getDiscoveredAgents(tenantId?: string): Promise<ApiAgentsResponse> {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : "";
+    return this.request<ApiAgentsResponse>(`/api/agents${query}`);
+  }
+
+  async getTelemetryStatus(tenantId?: string): Promise<ApiTelemetryStatusResponse> {
+    const query = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : "";
+    return this.request<ApiTelemetryStatusResponse>(`/api/telemetry/status${query}`);
   }
 
   async pauseAgent(agent: string): Promise<{ paused: boolean; agent: string }> {

@@ -30,6 +30,15 @@ export const ReviewKpiSection: React.FC<ReviewKpiSectionProps> = ({
                 <rect x="8" y="7" width="4" height="2" fill="#1b173b" />
               </svg>
             </div>
+
+            {/* Status indicator */}
+            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold ${
+              pendingCount > 0
+                ? 'bg-[#332b14] border border-[#71540f] text-[#facc15]'
+                : 'bg-[#1b173b] border border-[#3a3273] text-[#8b87a8]'
+            }`}>
+              <span>{pendingCount > 0 ? 'QUEUE ACTIVE' : 'QUEUE EMPTY'}</span>
+            </div>
           </div>
 
           <div className="mt-2">
@@ -60,10 +69,13 @@ export const ReviewKpiSection: React.FC<ReviewKpiSectionProps> = ({
               </svg>
             </div>
 
-            {/* Top Right Percentage Badge */}
-            <div className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#2b1f54] border border-[#533b9c] text-[#d8b4fe] text-xs font-semibold">
-              <span>↑</span>
-              <AnimatedNumber value={12} prefix="+" suffix="%" />
+            {/* Resolved Badge */}
+            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold ${
+              approvedCount > 0
+                ? 'bg-[#14331b] border border-[#1f6633] text-[#4ade80]'
+                : 'bg-[#1b173b] border border-[#3a3273] text-[#8b87a8]'
+            }`}>
+              <span>{approvedCount > 0 ? 'RESOLVED' : '0 RESOLVED'}</span>
             </div>
           </div>
 
@@ -95,10 +107,13 @@ export const ReviewKpiSection: React.FC<ReviewKpiSectionProps> = ({
               </svg>
             </div>
 
-            {/* Top Right Percentage Badge */}
-            <div className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#2b1f54] border border-[#533b9c] text-[#d8b4fe] text-xs font-semibold">
-              <span>↑</span>
-              <AnimatedNumber value={5} prefix="+" suffix="%" />
+            {/* Resolved Badge */}
+            <div className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold ${
+              deniedCount > 0
+                ? 'bg-[#381616] border border-[#782424] text-[#f87171]'
+                : 'bg-[#1b173b] border border-[#3a3273] text-[#8b87a8]'
+            }`}>
+              <span>{deniedCount > 0 ? 'RESOLVED' : '0 RESOLVED'}</span>
             </div>
           </div>
 
@@ -120,6 +135,11 @@ export const ReviewKpiSection: React.FC<ReviewKpiSectionProps> = ({
             {/* Hourglass Pixel Icon */}
             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#26204d] border border-[#453c7a] text-[#c4bbf0] shadow-sm">
               <PixelHourglassIcon size={18} />
+            </div>
+
+            {/* Status indicator */}
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#1b173b] border border-[#3a3273] text-[#8b87a8] text-[10px] font-mono font-semibold">
+              <span>{expiredCount > 0 ? 'EXPIRED' : '0 EXPIRED'}</span>
             </div>
           </div>
 

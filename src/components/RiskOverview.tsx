@@ -3,34 +3,51 @@ import { PixelSlidersIcon, PixelInfoIcon } from './pixel/PixelIcons';
 import { PixelCard } from './pixel/PixelCard';
 import { AnimatedNumber } from './pixel/AnimatedNumber';
 
-export const RiskOverview: React.FC = () => {
+export interface RiskTierCounts {
+  critical?: number;
+  high?: number;
+  medium?: number;
+  low?: number;
+}
+
+interface RiskOverviewProps {
+  counts?: RiskTierCounts | null;
+}
+
+export const RiskOverview: React.FC<RiskOverviewProps> = ({ counts }) => {
+  const critical = counts?.critical ?? 0;
+  const high = counts?.high ?? 0;
+  const medium = counts?.medium ?? 0;
+  const low = counts?.low ?? 0;
+  const total = critical + high + medium + low;
+
   const tiers = [
     {
       name: 'Critical',
       range: '(81–100)',
-      percentage: 3.4,
-      count: 132,
+      percentage: total > 0 ? Number(((critical / total) * 100).toFixed(1)) : 0,
+      count: critical,
       color: '#ef4444',
     },
     {
       name: 'High',
       range: '(61–80)',
-      percentage: 8.9,
-      count: 341,
+      percentage: total > 0 ? Number(((high / total) * 100).toFixed(1)) : 0,
+      count: high,
       color: '#f97316',
     },
     {
       name: 'Medium',
       range: '(31–60)',
-      percentage: 22.8,
-      count: 876,
+      percentage: total > 0 ? Number(((medium / total) * 100).toFixed(1)) : 0,
+      count: medium,
       color: '#eab308',
     },
     {
       name: 'Low',
       range: '(0–30)',
-      percentage: 64.9,
-      count: 2493,
+      percentage: total > 0 ? Number(((low / total) * 100).toFixed(1)) : 0,
+      count: low,
       color: '#22c55e',
     },
   ];

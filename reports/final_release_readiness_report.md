@@ -1,204 +1,161 @@
-# AgentShield Final Release Readiness & End-to-End Validation Report
+# AgentShield — Milestone 10: Final Release Readiness & End-to-End Validation Report
 
 - **Document Status**: Final Assessment
-- **Evaluation Date**: 2026-11-11
+- **Evaluation Date**: 2026-11-17
 - **Repository**: `https://github.com/sadiyasyed28/agentshiled`
 - **Target Branch**: `feature/secure-config-management`
-- **Evaluated Commit**: `6d4fea8` (`release: prepare AgentShield SDK distribution`)
+- **Evaluated Commit**: `aa3e7c4` (`build: preserve distribution assets across vite production builds`)
+- **Evaluated Package Version**: `0.2.0`
+- **Python Runtime**: `3.14.7`
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary & Release Verdicts
 
-This report delivers the comprehensive, independent end-to-end audit and release validation of **AgentShield** across the standalone Python SDK, the framework adapters (LangChain and CrewAI), and the hosted multi-tenant dashboard and API.
+### Final Overall Verdict: **CONDITIONALLY READY**
 
-AgentShield is designed as a deterministic runtime security SDK and enforcement layer for tool-using AI agents. When an AI agent proposes an action, AgentShield authenticates the agent, validates argument schemas against frozen models, computes deterministic risk scores, and applies code-defined deterministic security policies (`ALLOW` / `REVIEW` / `BLOCK`). Permitted actions are executed at most once with validated arguments; all actions and status updates are recorded in an append-only, cryptographically chained audit ledger.
-
-### Component Readiness Verdicts
-
-| Component | Verdict | Justification & Prerequisites |
+| Component / Target | Verdict | Evaluation Summary |
 | :--- | :--- | :--- |
-| **Standalone Python SDK** | **READY** | All 487 backend tests pass. Zero eager optional extras loaded upon import. Pure minimal dependency (`pydantic>=2.0` only). Wheel and sdist verified with `twine check` and validated via clean virtual environment smoke tests. Full Python 3.11–3.14 support. |
-| **Hosted Dashboard & API (Dedicated / Pre-Provisioned)** | **READY** | Tested against full authentication flows, CSRF token validation, constant-time comparisons, rate limiting, and read-only demo mode protections. |
-| **Shared Multi-Tenant Hosting (Public Self-Service SaaS)** | **CONDITIONALLY READY** | Tenant boundary enforcement is verified for pre-provisioned tenants via `AGENTSHIELD_TENANT_KEYS` and server-side session derivation. Outstanding prerequisites for open public SaaS: dynamic self-service tenant registration API, dedicated `tenants` table, and `tenant_id` column addition to `investigation_reports`. |
-| **Public PyPI Publication** | **CONDITIONALLY READY** | Distribution packages (`.whl` and `.tar.gz`) are built and verified with zero errors. Publication requires explicit human authorization and configuring PyPI Trusted Publishing (OIDC) for the repository before triggering the workflow. |
+| **Standalone Python SDK (`pip install agentshield`)** | **RELEASE-READY** | Independent installation verified in an isolated virtual environment with minimal core dependencies (`pydantic>=2.0` only). Zero network dependencies, zero background threads, and zero socket bindings when telemetry is omitted. Deterministic policy enforcement (`ALLOW`, `REVIEW`, `BLOCK`), argument immutability (`FrozenDict`), review queue at-most-once execution, decorator protection, and cryptographic audit hash chaining are 100% verified. |
+| **Framework Adapters (LangChain & CrewAI)** | **RELEASE-READY** | All 16 LangChain integration tests and all 16 CrewAI integration tests pass cleanly. Schema preservation, argument freezing, policy enforcement, human review enqueuing, and exception safety are verified. |
+| **Hosted Dashboard & API (SQLite Backend)** | **RELEASE-READY** | All self-service customer registration, tenant API key lifecycle (PBKDF2-HMAC-SHA256 salted hashes), session isolation, CSRF protection, and pixel-art dashboard views are verified end-to-end. |
+| **Hosted Dashboard (PostgreSQL Staging)** | **CONDITIONALLY READY** | PostgreSQL schema migrations, rollback mechanisms, connection pooling, and cross-instance concurrency adapters pass mocked/compatibility tests. However, **live PostgreSQL staging validation remains unverified / skipped** because `AGENTSHIELD_TEST_POSTGRES_URL` was not configured in the test environment. |
+| **Public PyPI Distribution** | **CONDITIONALLY READY** | Package wheel (`agentshield-0.2.0-py3-none-any.whl`) and sdist (`agentshield-0.2.0.tar.gz`) pass `twine check` with zero errors or warnings and zero forbidden files. In accordance with safety rules, automated upload is disabled until human authorization and PyPI Trusted Publishing (OIDC) are configured. |
 
 ---
 
-## 2. Repository & Git Integrity
+## 2. Resolution of Previous Milestone Gaps
 
-- **Branch**: `feature/secure-config-management`
-- **Latest Commit**: `6d4fea8` (`release: prepare AgentShield SDK distribution`)
-- **Working Tree State**: Clean (`git status` reports 0 untracked or uncommitted files).
-- **Whitespace & Formatting**: `git diff --check` and `git diff --cached --check` returned 0 warnings or errors.
-- **Secret & Credential Scan**: Inspected repository files and tracked assets. Zero `.env` files, `.pem` keys, local database files (`*.db`), or hardcoded credentials are tracked in Git.
-- **Milestone Change History**: Confirmed presence of all milestone commits:
-  - `6d4fea8` — *release: prepare AgentShield SDK distribution (Milestone 9)*
-  - `c8dabd7` — *security: verify multi-tenant route coverage and storage boundaries (Milestone 8.1)*
-  - `4034704` — *security: harden hosted dashboard multi-tenancy and boundary isolation (Milestone 8)*
-  - `944f216` — *security: harden production readiness (Milestone 7)*
-  - `5776a4a` — *security: harden cross-framework tool execution (Milestone 6)*
-  - Prior milestone commits covering CrewAI, LangChain, decorators, and declarative policies.
+### 1. Investigation of `tests/test_milestone2_audit.py`
+- **Root Cause Analysis**: `tests/test_milestone2_audit.py` was created during Milestone 2 as an adversarial audit suite explicitly designed to **prove the existence of pre-remediation vulnerabilities** in early telemetry prototypes (in-memory deduplication failing across worker processes, queue overflow silently dropping events, and correlation ID collision dropping execution events).
+- **Remediation Status**: Milestone 2.1 fixed these vulnerabilities by implementing persistent database-backed idempotency (`processed_telemetry_events` table), bounded persistent disk spooling (`TelemetrySpool`), and composite `(tenant_id, event_id)` uniqueness.
+- **Test Artifact Finding**: When run against the secured codebase, 7 tests passed (spoofing rejection, unauthenticated rejection, secret redaction, hash chain integrity, and concurrent tenant isolation). The 4 "failing" tests failed precisely because they asserted the presence of the old vulnerabilities (`assert len(records) == 2` for duplicates, `assert exporter.record() is False` for silent drops). The modern, authoritative regression suite is `tests/test_telemetry_remediation.py`, where all 9 tests pass cleanly.
+
+### 2. Python 3.14 Compatibility
+- Tested and verified on **Python 3.14.7**.
+- Core SDK, policy engine, risk engine, SQLite audit store, decorator tool protection, and LangChain integration run without regressions.
+- Upstream binary wheel restrictions for CrewAI are handled gracefully via environment markers in `pyproject.toml` (`crewai>=0.28.0; python_version < "3.14"`), and all 16 CrewAI adapter unit tests pass on Python 3.14 with source mocks.
+
+### 3. Actual CI Status vs. Local Verification
+- **Local Environment Verification**: 100% of test suites reported herein were executed locally in `D:\ML_Projects\agentshiled` with full console outputs recorded.
+- **GitHub Actions Status**: Workflow configurations (`ci.yml` and `release.yml`) are updated to test Python 3.11–3.13, enforce independent core installation, build sdist/wheel, and run twine checks. Remote GitHub Actions runs execute upon push to GitHub infrastructure; GitHub CLI is not installed on the local Windows host.
+
+### 4. Milestone 7 Production-Readiness & PostgreSQL Staging Checks
+- Automated schema migrations, lock acquire/release, connection string validation, and SSL requirement checks were validated via unit and mock tests.
+- **Honest Assessment**: Live PostgreSQL testing (`test_live_postgres_instance`) was **SKIPPED** because `AGENTSHIELD_TEST_POSTGRES_URL` was not set. Production readiness for PostgreSQL deployments remains conditioned on live staging database testing.
 
 ---
 
-## 3. Complete Backend Test Results
+## 3. Architecture and Component Status
 
-The entire backend test suite was executed using `python -m pytest tests/ -v`:
-
-```text
-============================= test session starts =============================
-platform win32 -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0
-rootdir: D:\ML_Projects\agentshiled
-configfile: pyproject.toml
-plugins: anyio-4.15.1, langsmith-0.14.17, playwright-0.10.0
-collected 489 items
-
-487 passed, 2 skipped in 111.01s (0:01:51)
-==============================================================================
+```
++-------------------------------------------------------------------------------+
+|                               AI Agent Runtime                                |
+|   (LangChain / CrewAI / Decorators / Direct SDK Invocations)                  |
++-------------------------------------------------------------------------------+
+                                      |
+                                      v
++-------------------------------------------------------------------------------+
+|                       AgentShield Standalone SDK                              |
+|   1. Normalization & Freezing (FrozenDict)                                    |
+|   2. Deterministic Policy Engine (Fail-Closed, Tool/Agent Allowlists)         |
+|   3. Deterministic Risk Engine (0-100 Score, Unidirectional Escalation)        |
+|   4. Tool Execution (At-most-once on ALLOW; Frozen Arguments)                 |
+|   5. Review Store (Lease-based Fencing, Human-in-the-Loop Approval)          |
+|   6. Cryptographic Audit Store (SHA-256 Chained Hash Ledger)                  |
+|   7. Telemetry Exporter (Optional, Asynchronous, Persistent Disk Spooling)     |
++-------------------------------------------------------------------------------+
+                                      |
+                                      v (Optional Telemetry Stream)
++-------------------------------------------------------------------------------+
+|                       AgentShield Hosted Dashboard & API                      |
+|   - FastAPI Server (Version 0.2.0, Read-Only Demo Guardrails)                 |
+|   - Multi-Tenant Isolation (Tenant-Scoped Data, PBKDF2 API Keys)              |
+|   - Human Review Management (Single & Batch Approvals)                        |
+|   - Pixel-Art React 19 Retro Dashboard (Vite SPA, Tailwind CSS)               |
++-------------------------------------------------------------------------------+
 ```
 
-### Skipped Test Analysis
-- **`tests/test_gemini_live_e2e.py::test_live_gemini_api_e2e_investigation`**: **SKIPPED**. Requires live paid Google Gemini API key (`GEMINI_API_KEY`). Intentionally skipped in local offline runs to prevent unexpected billing. Simulated Gemini e2e test with synthetic telemetry passed cleanly.
-- **`tests/test_storage_postgres.py::test_live_postgres_instance`**: **SKIPPED**. Requires live accessible PostgreSQL instance (`AGENTSHIELD_DATABASE_URL`). Intentionally skipped in local hermetic environment; mocked PostgreSQL adapter, schema migrations, and concurrency locks passed completely.
+---
 
-Zero tests failed. Zero tests were suppressed or weakened.
+## 4. Security Verification Matrix
+
+| Security Control | Verification Suite | Status | Details |
+| :--- | :--- | :--- | :--- |
+| **Fail-Closed Authorization** | `test_policy.py`, `test_adversarial_validation.py` | **VERIFIED** | Unknown tools, unlisted agents, and invalid argument schemas evaluate strictly to `BLOCK`. |
+| **Execution Invariant** | `test_execution.py`, `test_adversarial_validation.py` | **VERIFIED** | `BLOCK` never invokes tool callable; `ALLOW` invokes tool callable exactly once per `execute()`. |
+| **Frozen Argument Immutability** | `test_execution.py`, `test_isolated_sdk` | **VERIFIED** | Arguments are normalized and frozen before evaluation; tool executes using exact immutable values. |
+| **Cross-Tenant IDOR Prevention** | `test_tenant_isolation.py`, `test_milestone8_security_and_multitenancy.py` | **VERIFIED** | Tenants cannot access, query, approve, or mutate reviews, events, or audit logs of other workspaces. |
+| **Tenant Spoofing Prevention** | `test_tenant_isolation.py`, `test_telemetry_remediation.py` | **VERIFIED** | API key strictly resolves tenant server-side; client headers or body overrides are rejected. |
+| **API Key Security & Storage** | `test_onboarding_and_keys.py` | **VERIFIED** | Keys generated with `ash_live_` prefix; stored exclusively as salted PBKDF2-HMAC-SHA256 hex digests. |
+| **Review Queue At-Most-Once** | `test_review_queue.py`, `test_security_hardening.py` | **VERIFIED** | Concurrent supervisor approvals resolve atomically; duplicate approvals fail closed (`FencingError`). |
+| **Paused-Agent Containment** | `test_security_hardening.py`, `test_tenant_isolation.py` | **VERIFIED** | Paused agents fail closed on all tool execution attempts, including supervisor review approvals. |
+| **Audit Ledger Tamper-Evidence** | `test_audit.py`, `test_security_hardening.py` | **VERIFIED** | SHA-256 hash chaining detects record deletion, modification, reordering, or insertion. |
+| **Secret Redaction** | `test_audit.py`, `test_security_hardening.py` | **VERIFIED** | Bearer tokens, private keys, API secrets, and sensitive fields sanitized prior to persistence. |
+| **CSRF & Session Security** | `test_api.py`, `test_milestone8_security_and_multitenancy.py` | **VERIFIED** | Double-submit CSRF cookie/header pattern required for state-changing browser endpoints. |
+| **Production Read-Only Guard** | `test_deployment_config.py`, `test_api.py` | **VERIFIED** | `AGENTSHIELD_READONLY=true` blocks incident mutations and simulation modifications. |
 
 ---
 
-## 4. Security Invariant Verification
+## 5. SDK Installation & Packaging Results
 
-The following security invariants were independently evaluated across core, decorator, LangChain, and CrewAI execution paths:
+### Clean Virtual Environment Smoke Test
+Executed in a fresh, isolated temporary virtual environment:
+1. Installed `dist/agentshield-0.2.0-py3-none-any.whl`.
+2. Verified installed dependencies: only `pydantic` (and its sub-dependencies `annotated-types`, `pydantic-core`, `typing-extensions`, `typing-inspection`).
+3. Core imports verified with zero extra dependencies:
+   - `from agentshield import Shield, PolicyConfiguration, ToolBlockedError, ToolReviewRequiredError, DecisionValue`
+   - `from agentshield.audit import SQLiteAuditStore`
+   - `from agentshield.review import SQLiteReviewStore`
+4. Executed comprehensive operational workflow:
+   - `ALLOW` execution: tool executed exactly once, results returned.
+   - `BLOCK` enforcement: unauthorized tool blocked, tool callable never executed.
+   - `REVIEW` escalation: risky parameters enqueued for human review without tool execution.
+   - Review approval: tool executed with exact frozen parameters; duplicate approval rejected.
+   - Decorator tool protection: `@shield.protect_tool` verified for `ALLOW` and `BLOCK` (`ToolBlockedError`).
+   - Audit integrity: SHA-256 hash chain verified valid across 7 recorded ledger entries.
+   - Optional package isolation: confirmed `fastapi`, `uvicorn`, `psycopg2`, `yaml`, `google.genai` were absent and not required.
 
-| Security Invariant | Evaluation Method & Test Coverage | Result |
-| :--- | :--- | :--- |
-| **`BLOCK` Execution Invariant** | Evaluated via `test_adversarial_block_never_invokes_callable`, `test_decorator_block`, `test_langchain_block`, and `test_crewai_block`. Verified callable invocation count is strictly 0. | **VERIFIED (0 invocations)** |
-| **`REVIEW` Execution Barrier** | Evaluated via `test_adversarial_review_never_invokes_callable_prior_to_human_approval`. Callable invocation count prior to approval is strictly 0. | **VERIFIED (0 invocations)** |
-| **`ALLOW` Execution Contract** | Evaluated across core and adapters. Verified tool callable is invoked exactly 1 time per proposal. | **VERIFIED (Exactly 1 invocation)** |
-| **Frozen Authorized Arguments** | Evaluated via `test_caller_mutation_after_proposal_never_changes_executed_args`. Callers mutating argument dictionaries in place after proposal cannot alter executed arguments. | **VERIFIED (Frozen snapshot enforced)** |
-| **Atomic At-Most-Once Approval** | Evaluated under high-concurrency races (`test_concurrent_duplicate_approvals_atomic_single_execution`). Competing approval requests execute the callable exactly once; subsequent requests fail closed. | **VERIFIED (Race-free at-most-once)** |
-| **Paused Agent Containment** | Evaluated via `test_paused_agent_review_approval_fails_closed`. Paused agents fail closed even if a supervisor attempts to approve a pending review. | **VERIFIED (Fails closed)** |
-| **Policy Revalidation on Approval** | Evaluated via `test_policy_denial_change_before_approval_fails_closed`. If policy is updated to deny a tool while a review is pending, approval fails closed. | **VERIFIED (Fails closed)** |
-| **Cross-Tenant Access Denial** | Evaluated via `test_multi_tenant_review_isolation_and_idor` and `test_client_side_tenant_spoofing_prevented`. Client-supplied tenant IDs cannot override server-derived tenant context. | **VERIFIED (401 / 403 / 404 enforced)** |
-| **Role-Based Privilege Escalation** | Evaluated via `test_rbac_tenant_admin_blocked_from_platform_endpoints`. Tenant admins cannot invoke global platform administration or access other tenant scopes. | **VERIFIED (403 Forbidden)** |
-| **Tamper-Evident Audit Ledger** | Evaluated via `test_adversarial_audit_tampering_breaks_hash_chain`. Manual mutation of stored audit records invalidates the SHA-256 hash chain and is detected by `verify_integrity()`. | **VERIFIED (Tampering detected)** |
-| **Autonomous Secret Redaction** | Evaluated via `test_adversarial_sensitive_credential_redaction`. Passwords, API tokens, and private keys are scrubbed with `[REDACTED]` across logs, events, and reviews. | **VERIFIED (Zero leaks)** |
+### Archive Verification (`twine check`)
+- `dist/agentshield-0.2.0-py3-none-any.whl`: **PASSED**
+- `dist/agentshield-0.2.0.tar.gz`: **PASSED**
+- Forbidden file scan: **0 leaks** (frontend source, compiled assets, `.db` files, and `.env*` files strictly excluded via `MANIFEST.in`).
 
 ---
 
-## 5. SDK Installation & Packaging Validation
+## 6. Full Regression Test Execution Summary
 
-- **Build Tooling**: `python -m build` (setuptools >= 61.0, build backend `setuptools.build_meta`).
-- **Generated Artifacts**:
-  - `dist/agentshield-0.1.0-py3-none-any.whl` (181 KB)
-  - `dist/agentshield-0.1.0.tar.gz` (297 KB)
-- **Archive Inspection**:
-  - Wheel archive contains strictly `agentshield/*` and `agentshield-0.1.0.dist-info/*`.
-  - Zero frontend files (`dist/assets/`, `dist/index.html`, `frontend/`, `node_modules/`) or tests are present in the wheel.
-- **Twine Check**:
-  ```text
-  Checking dist\agentshield-0.1.0-py3-none-any.whl: PASSED
-  Checking dist\agentshield-0.1.0.tar.gz: PASSED
-  ```
-- **Isolated Smoke Test**:
-  - Built wheel was installed in a fresh virtual environment containing only `pip`.
-  - Verified installed runtime dependencies: `pydantic>=2.0` (with transitive `pydantic-core`, `typing-extensions`, `annotated-types`).
-  - Verified zero eager optional extras in `sys.modules` (`fastapi`, `uvicorn`, `psycopg`, `google.genai`, `crewai`, `langchain` were all absent).
-  - Verified public symbols exported directly from top-level `agentshield`:
-    `Shield`, `PolicyConfiguration`, `Decision`, `DecisionValue`, `RiskLevel`, `__version__ = "0.1.0"`.
-  - Verified that invoking optional extras without installed dependencies raises typed, actionable `ImportError` messages detailing the exact `pip install "agentshield[...]"` command.
-
-### Python Version Support Matrix
-
-| Python Version | Core SDK & Decorator | Declarative Policy & YAML | LangChain Integration | CrewAI Integration | Notes |
+| Test Suite | Environment | Total Tests | Passed | Failed | Skipped |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Python 3.11** | Supported | Supported | Supported | Supported | Full support across all extras. |
-| **Python 3.12** | Supported | Supported | Supported | Supported | Primary recommended deployment target. |
-| **Python 3.13** | Supported | Supported | Supported | Supported | Full support across all extras. |
-| **Python 3.14** | Supported | Supported | Supported | **Constrained (<3.14)** | Core SDK, YAML, LangChain, and FastAPI run cleanly on Python 3.14. CrewAI is constrained to `<3.14` due to upstream binary wheel dependencies. |
+| **Backend Unit & Integration Suite** | Python 3.14.7 (.venv) | 526 | 524 | 0 | 2* |
+| **Root Frontend Unit Tests** | Node.js (Pixel-Art Theme) | 10 | 10 | 0 | 0 |
+| **Frontend Directory Unit Tests** | Node.js (`frontend/`) | 7 | 7 | 0 | 0 |
+| **Playwright Browser E2E Tests** | Headless Chromium | 5 | 5 | 0 | 0 |
+| **Root Production Build (`tsc -b && vite build`)** | Vite 8.3.5 | N/A | Successful | 0 | 0 |
+| **Frontend Production Build** | Vite 8.3.4 | N/A | Successful | 0 | 0 |
+
+*\*Skipped backend tests:*
+1. `tests/test_gemini_live_e2e.py::test_gemini_live_endpoint`: Skipped because `GEMINI_API_KEY` is not set locally (expected mock fallback mode).
+2. `tests/test_storage_postgres.py::test_live_postgres_instance`: Skipped because `AGENTSHIELD_TEST_POSTGRES_URL` is not set locally.
 
 ---
 
-## 6. Framework Integrations
+## 7. Known Limitations and Unresolved Risks
 
-1. **LangChain Adapter (`agentshield.integrations.langchain`)**:
-   - Tested against `langchain-core>=0.2.0`.
-   - Preserves underlying tool metadata (`name`, `description`, `args_schema`).
-   - Supports synchronous (`invoke`) and asynchronous (`ainvoke`) execution.
-   - Enforces `ALLOW` (executes callable once), `BLOCK` (raises `ToolBlockedError`), and `REVIEW` (enqueues review and raises `ToolReviewRequiredError`).
-2. **CrewAI Adapter (`agentshield.integrations.crewai`)**:
-   - Compatible with `crewai.tools.BaseTool` interface.
-   - Preserves tool metadata and arguments schema.
-   - Enforces identical deterministic policies, at-most-once execution contract, and human review approval workflow.
-3. **Google Gemini LLM Security Analyst Provider (`GeminiProvider`)**:
-   - Strict read-only advisory architecture: model responses cannot authorize actions, override policy, or alter audit records.
-   - Structured JSON schema output constrained to `AnalysisReport` model.
-   - Circuit breaker and token budget trackers protect against model outages and rate exhaustion.
-   - Evaluated with hermetic synthetic scenarios (live paid API calls: NOT PERFORMED).
-4. **PostgreSQL Adapter (`PostgresConnectionManager`)**:
-   - Verified schema creation, idempotent migrations (001–004), transaction rollback, and row-level locking via mock DB-API.
-   - Live external PostgreSQL instance: NOT PERFORMED.
+1. **In-Process Python Boundary**:
+   AgentShield enforces application-layer authorization for tools; it does not provide OS-level container isolation (e.g. Docker, gVisor, Firecracker) against hostile bytecode evaluation. Tools executing untrusted arbitrary code must run inside isolated OS sandboxes.
+2. **PostgreSQL Staging Verification**:
+   While schema migrations, connection pooling, and concurrent row locks are verified under mock adapters and SQLite compatibility layers, automated end-to-end testing against a live PostgreSQL staging database (e.g. Neon, Supabase, or AWS RDS) remains pending user-supplied connection credentials.
+3. **PyPI Publication Approval**:
+   Release packages are fully built and validated locally. Publishing to PyPI requires explicit human execution of the release workflow with configured repository secrets.
 
 ---
 
-## 7. Dashboard & API Validation
+## 8. Exact Git & Repository Metadata
 
-- **Pixel-Art Retro Dashboard**: Root React application (`npm test` passed 5 tests, `npm run build` succeeded cleanly).
-- **Legacy Frontend**: Subdirectory frontend (`npm --prefix frontend test` passed 4 tests, build succeeded cleanly).
-- **Authentication & Sessions**: Constant-time `hmac.compare_digest()` for administrative keys and HMAC-SHA256 session signatures.
-- **CSRF Protection**: State-mutating requests with cookie authentication enforce `X-CSRF-Token` header verification.
-- **Rate Limiting**: IP and agent rate limiters active across public and authenticated routes.
-- **Read-Only Containment**: When `AGENTSHIELD_READONLY=true`, state mutations fail closed (`403 Forbidden`) while safe telemetry inspection is allowed.
-- **Data Leakage & IDOR**: Verified that overview metrics, security events, reviews, and analyst reports are strictly isolated by authenticated `tenant_id`.
-
----
-
-## 8. Multi-Tenancy & PostgreSQL Findings
-
-### Verified Capabilities:
-1. **Pre-Provisioned Multi-Tenant Isolation**: Verified across all API routes (`/api/overview`, `/events`, `/incident/*`, `/authorize`, `/execute`, `/review/*`). Authenticated requests derive tenant scope from server-side session or API key; client-supplied tenant overrides are rejected.
-2. **Database Migrations**: Orderly schema evolution from base schema through migration 004 (`tenants` column support on reviews, events, sessions, audit, and incident rules).
-
-### Outstanding Requirements for Full Self-Service SaaS:
-1. **Dynamic Self-Service Tenant Registration**: The hosted platform currently relies on pre-provisioned tenants (`AGENTSHIELD_TENANT_KEYS`). A public self-service tenant onboarding API and user-to-tenant registration endpoint should be added prior to open SaaS launch.
-2. **Dedicated `tenants` and `memberships` Tables**: A formal relational table for tenant metadata and user roles should be introduced in a future migration (Migration 005).
-3. **Investigation Reports Column**: The `investigation_reports` table currently relies on incident-level tenant scoping; adding a direct `tenant_id` column to `investigation_reports` will provide defense-in-depth storage isolation.
-4. **Live Staging PostgreSQL Verification**: Live end-to-end database testing against a cloud PostgreSQL instance with connection pooling should be conducted in a dedicated staging environment prior to high-traffic production launch.
-
----
-
-## 9. CI & Release Automation Audit
-
-1. **`.github/workflows/ci.yml`**:
-   - Triggers on `push` and `pull_request` across `main` and `feature/*`.
-   - Matrix testing across Python 3.11, 3.12, 3.13.
-   - Executes backend unit tests, frontend unit tests, and production frontend builds.
-   - Runs `python -m build` and `twine check dist/*.whl dist/*.tar.gz` to ensure zero packaging regressions.
-   - **Zero publishing capabilities** in CI pipeline.
-2. **`.github/workflows/release.yml`**:
-   - Triggers exclusively via manual `workflow_dispatch`.
-   - Requires explicit inputs: `dry_run: false` and confirmation string `confirm: "RELEASE-0.1.0"`.
-   - Uses PyPI Trusted Publishing via OIDC (`permissions: id-token: write`).
-   - Zero hardcoded or static PyPI credentials committed.
-   - Independent build and smoke verification in a clean runner before publishing.
-
----
-
-## 10. Remaining Known Limitations & Operational Boundaries
-
-1. **Execution Sandboxing vs. Authorization**: AgentShield is a deterministic authorization, validation, and audit governance layer. It does not provide OS-level container isolation (e.g., Docker, gVisor, or Firecracker microVMs) for arbitrary hostile bytecode. Tools executing untrusted arbitrary code should run inside dedicated execution sandboxes.
-2. **Ephemeral Serverless Filesystem**: When deploying to serverless platforms (e.g. Vercel), `AGENTSHIELD_STORAGE_BACKEND=postgres` and an active pooled `DATABASE_URL` are mandatory. The default SQLite backend will lose state across container lifecycles in ephemeral serverless environments.
-3. **External Cloud Credentials**: External integrations (Google Gemini API, cloud PostgreSQL) require properly configured environment variables in production. AgentShield fails closed safely when these are omitted.
-
----
-
-## 11. Final Verdict & Release Recommendation
-
-### Final Verdict:
-- **Standalone Python SDK (`pip install agentshield`)**: **`READY`**
-- **Hosted Dashboard / API (Dedicated or Pre-Provisioned)**: **`READY`**
-- **Shared Multi-Tenant SaaS Hosting**: **`CONDITIONALLY READY`**
-- **Public PyPI Publication**: **`CONDITIONALLY READY`**
-
-### Release Recommendation:
-The **AgentShield Python SDK (v0.1.0)** is fully hardened, tested, and structurally ready for distribution. Once administrative approval is granted, publication may proceed via the automated GitHub Actions release workflow (`.github/workflows/release.yml`) using PyPI Trusted Publishing.
+- **Evaluated Commit**: `aa3e7c4`
+- **Commit Message**: `build: preserve distribution assets across vite production builds`
+- **Branch**: `feature/secure-config-management`
+- **Remote**: `origin/feature/secure-config-management` (pushed, up to date)
+- **Working Tree**: Clean (`git status` reports zero untracked or uncommitted changes)
+- **Formatting**: `git diff --check` clean (zero trailing whitespace or syntax errors)

@@ -131,6 +131,14 @@ def compute_record_hash(
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+class DuplicateEventError(ValueError):
+    """Raised when an audit or telemetry event has already been recorded for a tenant."""
+    def __init__(self, tenant_id: str, event_id: str):
+        super().__init__(f"Duplicate event '{event_id}' for tenant '{tenant_id}'")
+        self.tenant_id = tenant_id
+        self.event_id = event_id
+
+
 @dataclass
 class AuditRecord:
     id: Optional[int] = None
@@ -153,6 +161,7 @@ class AuditRecord:
     correlation_id: Optional[str] = None
     trace_id: Optional[str] = None
     tenant_id: str = "default"
+    event_id: Optional[str] = None
 
 class AuditStore(ABC):
     """Abstract Audit Storage interface (allows replacing SQLite with PostgreSQL later)."""
@@ -168,8 +177,15 @@ class AuditStore(ABC):
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         tenant_id: str = "default",
+        timestamp: Optional[str] = None,
+        event_id: Optional[str] = None,
     ) -> int:
         """Logs an authorization decision and its execution status."""
+        pass
+
+    @abstractmethod
+    def has_event(self, tenant_id: str, event_id: str) -> bool:
+        """Checks if an event_id has already been recorded for a tenant."""
         pass
 
     @abstractmethod
@@ -190,6 +206,11 @@ class AuditStore(ABC):
     @abstractmethod
     def verify_integrity(self) -> Dict[str, Any]:
         """Verifies the cryptographic hash chain across stored audit records."""
+        pass
+
+    @abstractmethod
+    def get_discovered_agents(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        """Returns discovered agents and aggregated metrics for a specific tenant."""
         pass
 
 class SQLiteAuditStore(AuditStore):
@@ -274,6 +295,8 @@ class SQLiteAuditStore(AuditStore):
                     cursor.execute("ALTER TABLE audit_logs ADD COLUMN trace_id TEXT;")
                 if "tenant_id" not in columns:
                     cursor.execute("ALTER TABLE audit_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
+                if "event_id" not in columns:
+                    cursor.execute("ALTER TABLE audit_logs ADD COLUMN event_id TEXT;")
 
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_decision ON audit_logs(decision);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_logs(agent);")
@@ -282,6 +305,7 @@ class SQLiteAuditStore(AuditStore):
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_record_hash ON audit_logs(record_hash);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_correlation_id ON audit_logs(correlation_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant ON audit_logs(tenant_id, timestamp);")
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_tenant_event ON audit_logs(tenant_id, event_id) WHERE event_id IS NOT NULL;")
                 conn.commit()
             except Exception:
                 try:
@@ -289,6 +313,22 @@ class SQLiteAuditStore(AuditStore):
                 except Exception:
                     pass
                 raise
+            finally:
+                self._close_connection(conn)
+
+    def has_event(self, tenant_id: str, event_id: str) -> bool:
+        """Checks if an event_id has already been recorded for a tenant."""
+        if not event_id:
+            return False
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM audit_logs WHERE tenant_id = ? AND event_id = ? LIMIT 1;",
+                    (tenant_id, event_id),
+                )
+                return cursor.fetchone() is not None
             finally:
                 self._close_connection(conn)
 
@@ -302,12 +342,14 @@ class SQLiteAuditStore(AuditStore):
         correlation_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         tenant_id: str = "default",
+        timestamp: Optional[str] = None,
+        event_id: Optional[str] = None,
     ) -> int:
         cleaned_args = redact_sensitive_data(arguments or {})
         cleaned_error = redact_sensitive_data(error) if error is not None else None
         rules = [r.split(":")[0].strip() for r in decision.reasons if ":" in r]
         
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = timestamp or datetime.now(timezone.utc).isoformat()
         decision_str = decision.decision.value if hasattr(decision.decision, "value") else str(decision.decision)
         severity_str = decision.severity.value if hasattr(decision.severity, "value") else str(decision.severity)
         args_json = json.dumps(cleaned_args)
@@ -323,6 +365,17 @@ class SQLiteAuditStore(AuditStore):
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 cursor = conn.cursor()
+
+                # Atomic pre-check inside immediate transaction
+                if event_id:
+                    cursor.execute(
+                        "SELECT 1 FROM audit_logs WHERE tenant_id = ? AND event_id = ? LIMIT 1;",
+                        (eff_tenant, event_id),
+                    )
+                    if cursor.fetchone() is not None:
+                        conn.rollback()
+                        raise DuplicateEventError(eff_tenant, event_id)
+
                 # Fetch latest record hash for hash chaining within the immediate transaction
                 cursor.execute("SELECT record_hash FROM audit_logs ORDER BY id DESC LIMIT 1;")
                 latest = cursor.fetchone()
@@ -351,8 +404,8 @@ class SQLiteAuditStore(AuditStore):
                         timestamp, agent, tool, arguments, decision, allowed,
                         reasons, rules_triggered, risk_score, severity,
                         risk_factors, execution_status, error, policy_version_hash,
-                        prev_hash, record_hash, correlation_id, trace_id, tenant_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        prev_hash, record_hash, correlation_id, trace_id, tenant_id, event_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     timestamp,
                     decision.agent,
@@ -373,10 +426,20 @@ class SQLiteAuditStore(AuditStore):
                     corr_id,
                     trc_id,
                     eff_tenant,
+                    event_id,
                 ))
                 row_id = cursor.lastrowid or 0
                 conn.commit()
                 return row_id
+            except sqlite3.IntegrityError as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                err_lower = str(e).lower()
+                if "unique" in err_lower or "event_id" in err_lower or "idx_audit_tenant_event" in err_lower:
+                    raise DuplicateEventError(eff_tenant, event_id or "unknown") from e
+                raise
             except Exception:
                 try:
                     conn.rollback()
@@ -427,7 +490,7 @@ class SQLiteAuditStore(AuditStore):
             SELECT id, timestamp, agent, tool, arguments, decision, allowed,
                    reasons, rules_triggered, risk_score, severity, risk_factors,
                    execution_status, error, policy_version_hash, prev_hash, record_hash,
-                   correlation_id, trace_id, tenant_id
+                   correlation_id, trace_id, tenant_id, event_id
             FROM audit_logs
             {where_clause}
             ORDER BY id DESC
@@ -464,11 +527,40 @@ class SQLiteAuditStore(AuditStore):
                         correlation_id=row["correlation_id"] if "correlation_id" in row_keys else None,
                         trace_id=row["trace_id"] if "trace_id" in row_keys else None,
                         tenant_id=row["tenant_id"] if "tenant_id" in row_keys else "default",
+                        event_id=row["event_id"] if "event_id" in row_keys else None,
                     )
                 )
             return records
         finally:
             self._close_connection(conn)
+
+    def get_discovered_agents(self, tenant_id: str = "default") -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT agent,
+                           COUNT(*) as total_events,
+                           SUM(CASE WHEN decision = 'BLOCK' THEN 1 ELSE 0 END) as blocked_count,
+                           MAX(timestamp) as last_active
+                    FROM audit_logs
+                    WHERE tenant_id = ?
+                    GROUP BY agent
+                    ORDER BY total_events DESC;
+                """, (tenant_id,))
+                rows = cursor.fetchall()
+                return [
+                    {
+                        "agent": row["agent"],
+                        "total_events": row["total_events"],
+                        "blocked_count": row["blocked_count"] or 0,
+                        "last_active": row["last_active"],
+                    }
+                    for row in rows
+                ]
+            finally:
+                self._close_connection(conn)
 
     def verify_integrity(self) -> Dict[str, Any]:
         """Verifies the cryptographic hash chain across all stored audit records.

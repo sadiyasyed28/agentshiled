@@ -39,33 +39,41 @@ export const CategoryResultsPanel: React.FC<CategoryResultsPanelProps> = ({ curr
           </div>
         </div>
 
-        {/* 6 CATEGORY ROWS */}
+        {/* CATEGORY ROWS */}
         <div className="flex-1 flex flex-col justify-around py-2.5 space-y-3">
-          {currentRun.categoryResults.map((cat, index) => {
-            const pct = Math.min(100, Math.max(0, (cat.completed / cat.total) * 100));
+          {currentRun.categoryResults.length === 0 ? (
+            <div className="text-center py-8 text-xs font-mono text-[#8b87a8]">
+              No test scenario categories recorded
+            </div>
+          ) : (
+            currentRun.categoryResults.map((cat, index) => {
+              const pct = cat.total > 0
+                ? Math.min(100, Math.max(0, (cat.completed / cat.total) * 100))
+                : 0;
 
-            return (
-              <div key={cat.category} className="flex items-center gap-3">
-                {/* Left: Category Title */}
-                <div className="w-48 sm:w-56 flex-shrink-0 text-xs font-semibold text-[#dedaf4] truncate">
-                  {cat.category}
-                </div>
+              return (
+                <div key={cat.category} className="flex items-center gap-3">
+                  {/* Left: Category Title */}
+                  <div className="w-48 sm:w-56 flex-shrink-0 text-xs font-semibold text-[#dedaf4] truncate">
+                    {cat.category}
+                  </div>
 
-                {/* Center: Progress Bar Track */}
-                <div className="flex-1 h-2 rounded-xs bg-[#201d40] overflow-hidden">
-                  <div
-                    className="h-full bg-[#22c55e] rounded-xs shadow-[0_0_8px_rgba(34,197,94,0.35)] transition-all duration-300 bar-grow"
-                    style={{ width: `${pct}%`, animationDelay: `${index * 70}ms` }}
-                  />
-                </div>
+                  {/* Center: Progress Bar Track */}
+                  <div className="flex-1 h-2 rounded-xs bg-[#201d40] overflow-hidden">
+                    <div
+                      className="h-full bg-[#22c55e] rounded-xs shadow-[0_0_8px_rgba(34,197,94,0.35)] transition-all duration-300 bar-grow"
+                      style={{ width: `${pct}%`, animationDelay: `${index * 70}ms` }}
+                    />
+                  </div>
 
-                {/* Right: Ratio fraction */}
-                <div className="w-9 text-right text-xs font-mono font-bold text-white">
-                  {cat.ratio}
+                  {/* Right: Ratio fraction */}
+                  <div className="w-9 text-right text-xs font-mono font-bold text-white">
+                    {cat.ratio}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
       </div>
     </div>

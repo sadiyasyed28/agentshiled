@@ -5,6 +5,41 @@ All notable changes to the **AgentShield** Python SDK will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-16
+
+### SDK Cloud Telemetry, Multi-Tenancy & Distribution Hardening
+
+#### Added
+- **Remote Telemetry Exporter (`TelemetryConfig`, `TelemetryExporter`, `TelemetrySpool`)**:
+  - Optional cloud telemetry streaming for externally running Python agents.
+  - Automatically configured via `AGENTSHIELD_API_URL` and `AGENTSHIELD_API_KEY` or constructor arguments.
+  - Asynchronous background worker batching authorization decisions, execution results, and audit events.
+  - Persistent bounded disk spooling (`TelemetrySpool`) for offline resiliency and transparent recovery during network outages.
+  - Exponential backoff with jitter and configurable queue limits to prevent memory bloat or agent blocking.
+  - Zero-overhead, zero-network fallback when telemetry is not configured.
+- **Self-Service Customer Onboarding & API Key Management**:
+  - Developers can register workspaces and generate hashed API keys (`ash_live_...`).
+  - SHA-256 key hashing at rest with constant-time matching and one-time key display at creation.
+  - Full key lifecycle operations: listing masked keys (`ash_live_...last4`), revocation, and rotation.
+- **Strict Multi-Tenant Isolation**:
+  - Authenticated server context derivation for all queries, reviews, agent pauses, and event lookups.
+  - Hard rejection (403 Forbidden) for cross-tenant spoofing attempts via headers (`x-tenant-id`) or payload mismatches.
+  - Role-Based Access Control: tenant admin data scoping with global admin restriction on platform-wide audit chain verification.
+- **Honest Dashboard Data & Metrics**:
+  - Removed all production-facing mock fallbacks from KPI sections, decision charts, and review queues.
+  - Empty workspace states display genuine onboarding instructions rather than synthetic demo numbers.
+- **Release Packaging & Distribution Engineering**:
+  - Canonical `MANIFEST.in` explicitly including Python package source and excluding all frontend and local test database files.
+  - Fully validated sdist (`.tar.gz`) and wheel (`.whl`) builds passing Twine validation.
+  - Clean isolated virtual environment installation and smoke tests.
+
+#### Changed
+- Upgraded package version to `0.2.0` across SDK metadata, CLI, and API definitions.
+- Resolved in-memory SQLite tenant store isolation using thread-safe shared connection semantics.
+- Telemetry status endpoint derives health dynamically from storage health and exporter status.
+
+---
+
 ## [0.1.0] - 2026-11-11
 
 ### Initial Public Release of the AgentShield Python SDK

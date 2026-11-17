@@ -201,7 +201,22 @@ class Shield:
         metrics_collector: Optional[Any] = None,
         policy: Optional[Any] = None,
         policy_config: Optional[Any] = None,
+        telemetry_config: Optional[Any] = None,
+        telemetry_exporter: Optional[Any] = None,
+        tenant_id: Optional[str] = None,
     ):
+        self.tenant_id = tenant_id or "default"
+        self.telemetry_exporter = telemetry_exporter
+        if self.telemetry_exporter is None:
+            if telemetry_config is not None:
+                from agentshield.telemetry import TelemetryExporter
+                self.telemetry_exporter = TelemetryExporter(telemetry_config)
+            else:
+                from agentshield.telemetry import TelemetryConfig, TelemetryExporter
+                env_cfg = TelemetryConfig.from_env()
+                if env_cfg.is_configured:
+                    self.telemetry_exporter = TelemetryExporter(env_cfg)
+
         self.registry = ToolRegistry()
         self.analyst = analyst
         self.secret_provider = secret_provider
@@ -826,6 +841,41 @@ class Shield:
         metadata: Optional[Dict[str, Any]] = None,
         tenant_id: Optional[str] = None,
     ) -> Optional[SecurityEvent]:
+        eff_tenant = tenant_id or getattr(self, "tenant_id", "default")
+
+        # 1. Cloud Telemetry Export (if configured)
+        if getattr(self, "telemetry_exporter", None):
+            try:
+                args = {}
+                exec_status = "executed" if decision == "ALLOW" else "not_executed"
+                error_msg = None
+                if isinstance(metadata, dict):
+                    args = metadata.get("arguments") or {}
+                    if "execution_status" in metadata:
+                        exec_status = metadata["execution_status"]
+                    error_msg = metadata.get("error")
+
+                self.telemetry_exporter.record_event(
+                    agent=agent_id,
+                    tool=tool,
+                    event_type=event_type,
+                    severity=severity,
+                    decision=decision or "BLOCK",
+                    allowed=(decision == "ALLOW" and exec_status == "executed"),
+                    reasons=evidence or [],
+                    risk_score=risk_score,
+                    execution_status=exec_status,
+                    arguments=args,
+                    error=error_msg,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                    tenant_id=eff_tenant,
+                    metadata=metadata or {},
+                )
+            except Exception:
+                pass
+
+        # 2. Local Event Manager (if configured)
         if not getattr(self, "event_manager", None):
             return None
         try:
@@ -840,10 +890,44 @@ class Shield:
                 trace_id=trace_id,
                 correlation_id=correlation_id,
                 metadata=metadata or {},
-                tenant_id=tenant_id or "default",
+                tenant_id=eff_tenant,
             )
         except Exception:
             return None
+
+    @property
+    def telemetry_dropped_count(self) -> int:
+        """Returns the number of telemetry events dropped due to queue/spool exhaustion."""
+        if getattr(self, "telemetry_exporter", None):
+            return self.telemetry_exporter.dropped_count
+        return 0
+
+    def get_telemetry_stats(self) -> Dict[str, Any]:
+        """Returns telemetry exporter operational metrics and delivery status."""
+        if getattr(self, "telemetry_exporter", None):
+            return self.telemetry_exporter.stats
+        return {"configured": False}
+
+    def replay_telemetry_spool(self, max_batches: int = 20) -> int:
+        """Manually triggers replay of spooled telemetry events from local disk."""
+        if getattr(self, "telemetry_exporter", None):
+            return self.telemetry_exporter.replay_spool(max_batches=max_batches)
+        return 0
+
+    def flush_telemetry(self, timeout: float = 5.0) -> bool:
+        """Flushes any queued or spooled telemetry events. Returns True only if completely drained."""
+        if getattr(self, "telemetry_exporter", None):
+            return self.telemetry_exporter.flush(timeout=timeout)
+        return True
+
+    def close(self, timeout: float = 5.0) -> bool:
+        """
+        Gracefully flushes pending events, replays spooled records, and terminates worker threads.
+        Returns True if all events were successfully delivered, False if any remain pending.
+        """
+        if getattr(self, "telemetry_exporter", None):
+            return self.telemetry_exporter.close(timeout=timeout)
+        return True
 
     def pause_agent(self, agent: str, actor: str = "system", tenant_id: Optional[str] = None) -> None:
         """Pauses an agent immediately; all actions fail closed to BLOCK."""

@@ -24,6 +24,7 @@ from agentshield.storage.migrations import MigrationManager
 from agentshield.storage.review import PostgresReviewStore
 from agentshield.storage.sessions import PostgresSessionStore
 from agentshield.storage.simulation import PostgresSimulationStore
+from agentshield.storage.tenants import PostgresTenantStore, SqliteTenantStore, TenantStore
 
 
 @dataclass
@@ -39,6 +40,7 @@ class StoreBundle:
     sim_event_store: EventStore
     backend: str  # "postgres" or "sqlite"
     rate_limiter: Optional[Any] = None
+    tenant_store: Optional[Any] = None
 
 
 def create_postgres_stores(
@@ -58,6 +60,7 @@ def create_postgres_stores(
     report_store = PostgresReportStore(dsn=dsn, connection_manager=cm)
     session_store = PostgresSessionStore(dsn=dsn, connection_manager=cm)
     simulation_store = PostgresSimulationStore(dsn=dsn, connection_manager=cm)
+    tenant_store = PostgresTenantStore(dsn=dsn, connection_manager=cm)
 
     # Isolated simulator storage using distinct table prefixes
     sim_review_store = PostgresReviewStore(dsn=dsn, table_prefix="sim_", connection_manager=cm)
@@ -77,6 +80,7 @@ def create_postgres_stores(
         sim_event_store=sim_event_store,
         backend="postgres",
         rate_limiter=rate_limiter,
+        tenant_store=tenant_store,
     )
 
 
@@ -88,6 +92,7 @@ def create_stores(
     reports_db_path: Optional[str] = None,
     sessions_db_path: Optional[str] = None,
     simulation_db_path: Optional[str] = None,
+    tenants_db_path: Optional[str] = None,
     connection_manager: Optional[PostgresConnectionManager] = None,
 ) -> StoreBundle:
     """Creates the appropriate StoreBundle based on environment or explicit parameters.
@@ -188,6 +193,15 @@ def create_stores(
         rate_limit_file = effective_rate_limit_path or os.path.join(tempfile.gettempdir(), "agentshield_rate_limits.db")
         rate_limiter = SqliteRateLimiter(db_path=rate_limit_file)
 
+    effective_tenants_path = _derive_companion_path(
+        tenants_db_path, "AGENTSHIELD_TENANTS_DB", "agentshield_tenants.db", "tenants"
+    )
+    if effective_tenants_path == ":memory:":
+        tenant_store = SqliteTenantStore(db_path=":memory:")
+    else:
+        tenants_file = effective_tenants_path or os.path.join(tempfile.gettempdir(), "agentshield_tenants.db")
+        tenant_store = SqliteTenantStore(db_path=tenants_file)
+
     return StoreBundle(
         audit_store=audit_store,
         review_store=review_store,
@@ -199,4 +213,5 @@ def create_stores(
         sim_event_store=sim_event_store,
         backend="sqlite",
         rate_limiter=rate_limiter,
+        tenant_store=tenant_store,
     )

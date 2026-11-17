@@ -235,8 +235,14 @@ export const ReviewTable: React.FC<ReviewTableProps> = ({
         {/* FOOTER */}
         <div className="flex items-center justify-between px-4 py-2.5 border-t border-[#292352] bg-[#16142e] text-xs text-[#9c96c9] select-none font-medium">
           <div>
-            Showing <span className="text-white font-mono">1–<AnimatedNumber value={requests.length} /></span> of{' '}
-            <span className="text-white font-mono"><AnimatedNumber value={requests.length} /></span> requests
+            {requests.length === 0 ? (
+              <span>0 requests</span>
+            ) : (
+              <>
+                Showing <span className="text-white font-mono">1–<AnimatedNumber value={requests.length} /></span> of{' '}
+                <span className="text-white font-mono"><AnimatedNumber value={requests.length} /></span> requests
+              </>
+            )}
           </div>
         </div>
       </div>

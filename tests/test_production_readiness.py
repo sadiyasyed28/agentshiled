@@ -635,7 +635,7 @@ def test_public_sdk_exports():
     """Verify top-level package exports, versioning, and core symbols."""
     import agentshield
     assert hasattr(agentshield, "__version__")
-    assert agentshield.__version__ == "0.1.0"
+    assert agentshield.__version__ == "0.2.0"
     assert agentshield.Decision is Decision
     assert agentshield.DecisionValue is DecisionValue
     assert agentshield.RiskLevel is RiskLevel

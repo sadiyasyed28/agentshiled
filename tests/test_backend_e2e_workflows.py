@@ -53,7 +53,7 @@ async def test_workflow_01_public_dashboard_health_and_overview(app_env):
         assert res_health.status_code == 200
         health = res_health.json()
         assert health["status"] == "healthy"
-        assert health["version"] == "0.1.0"
+        assert health["version"] == "0.2.0"
         assert health["read_only"] is False
 
         # 2. Overview statistics

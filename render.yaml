@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: agentshield-backend-staging
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt && pip install ."
+    startCommand: "uvicorn agentshield.api.app:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: AGENTSHIELD_ENV
+        value: staging
+      - key: AGENTSHIELD_READONLY
+        value: "true"
+      - key: AGENTSHIELD_ALLOW_MOCK_FALLBACK
+        value: "false"
+      - key: AGENTSHIELD_ANALYST_PROVIDER
+        value: mock
+      - key: AGENTSHIELD_STORAGE_BACKEND
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      - key: AGENTSHIELD_ADMIN_KEY
+        sync: false
+      - key: AGENTSHIELD_SESSION_SECRET
+        sync: false
+      - key: AGENTSHIELD_CORS_ORIGINS
+        sync: false
+

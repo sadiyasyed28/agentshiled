@@ -19,17 +19,23 @@ export const SecurityActivityChart: React.FC<SecurityActivityChartProps> = ({ ac
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [hoveredPoint, setHoveredPoint] = useState<DayData | null>(null);
 
-  const defaultData: DayData[] = [
-    { day: 'Tue', allowed: 380, review: 85, blocked: 42 },
-    { day: 'Wed', allowed: 460, review: 95, blocked: 48 },
-    { day: 'Thu', allowed: 390, review: 88, blocked: 40 },
-    { day: 'Fri', allowed: 480, review: 105, blocked: 52 },
-    { day: 'Sat', allowed: 540, review: 95, blocked: 45 },
-    { day: 'Sun', allowed: 570, review: 88, blocked: 40 },
-    { day: 'Mon', allowed: 720, review: 125, blocked: 62 },
+  const emptyDays: DayData[] = [
+    { day: 'Tue', allowed: 0, review: 0, blocked: 0 },
+    { day: 'Wed', allowed: 0, review: 0, blocked: 0 },
+    { day: 'Thu', allowed: 0, review: 0, blocked: 0 },
+    { day: 'Fri', allowed: 0, review: 0, blocked: 0 },
+    { day: 'Sat', allowed: 0, review: 0, blocked: 0 },
+    { day: 'Sun', allowed: 0, review: 0, blocked: 0 },
+    { day: 'Mon', allowed: 0, review: 0, blocked: 0 },
   ];
 
-  const data = activityData && activityData.length >= 2 ? activityData : defaultData;
+  const hasActivity = Boolean(
+    activityData &&
+    activityData.length >= 2 &&
+    activityData.some((d) => d.allowed > 0 || d.review > 0 || d.blocked > 0)
+  );
+
+  const data = hasActivity && activityData ? activityData : emptyDays;
 
   const chartHeight = 135;
   const chartWidth = 460;
@@ -273,6 +279,15 @@ export const SecurityActivityChart: React.FC<SecurityActivityChartProps> = ({ ac
               <span className="w-1.5 h-1.5 rounded-full bg-[#f87171]" />
               {hoveredPoint.blocked}
             </span>
+          </div>
+        )}
+
+        {!hasActivity && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none pb-4">
+            <div className="px-3 py-1.5 rounded-md bg-[#181635]/90 border border-[#302a5c] text-center shadow-md">
+              <span className="text-[11.5px] font-semibold text-[#c7bff5] block">No security events recorded</span>
+              <span className="text-[9.5px] text-[#7d77a8] block mt-0.5">Stream agent tool decisions to view 7-day volume trends</span>
+            </div>
           </div>
         )}
       </div>

@@ -1,6 +1,6 @@
 """AgentShield core package."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .shield import (
     Shield,
@@ -23,7 +23,7 @@ from .policy import (
 )
 from .risk import RiskEngine
 from .detector import PromptInjectionDetector, InjectionFinding
-from .audit import AuditStore, SQLiteAuditStore, AuditRecord
+from .audit import AuditStore, SQLiteAuditStore, AuditRecord, DuplicateEventError
 from .review import ReviewStore, SQLiteReviewStore, ReviewExecutionState, FencingError
 from .secrets import SecretProvider, DictSecretProvider, EnvSecretProvider
 from .events import (
@@ -84,10 +84,16 @@ from .reliability import (
     create_rate_limiter,
 )
 from .config_validation import validate_runtime_config, sanitize_url, ConfigValidationResult
+from .telemetry import TelemetryConfig, TelemetryExporter, TelemetryEvent, TelemetrySpool
 
 __all__ = [
     "__version__",
     "Shield",
+    "TelemetryConfig",
+    "TelemetryExporter",
+    "TelemetryEvent",
+    "TelemetrySpool",
+    "DuplicateEventError",
     "Decision",
     "DecisionValue",
     "RiskLevel",

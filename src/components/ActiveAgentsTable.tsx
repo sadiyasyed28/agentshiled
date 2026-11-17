@@ -16,58 +16,7 @@ export const ActiveAgentsTable: React.FC<ActiveAgentsTableProps> = ({
   onViewAll,
   agents: customAgents,
 }) => {
-  const defaultAgents: Agent[] = [
-    {
-      id: 'research-agent',
-      name: 'research-agent',
-      status: 'Active',
-      policy: 'Research v2',
-      events7d: 1248,
-      blockedCount: 142,
-      blockedRate: '11.4%',
-      runtime: 'Python LangChain v0.2',
-      lastActive: 'Just now',
-      description: 'Web crawler and market intelligence gathering autonomous agent.',
-    },
-    {
-      id: 'ops-agent',
-      name: 'ops-agent',
-      status: 'Active',
-      policy: 'Operations v1',
-      events7d: 973,
-      blockedCount: 118,
-      blockedRate: '12.1%',
-      runtime: 'Go Agent Daemon v1.4',
-      lastActive: '2m ago',
-      description: 'Infrastructure automation and server health diagnostics.',
-    },
-    {
-      id: 'data-agent',
-      name: 'data-agent',
-      status: 'Active',
-      policy: 'Data Access v3',
-      events7d: 840,
-      blockedCount: 116,
-      blockedRate: '13.8%',
-      runtime: 'Node.js Agent SDK v3.1',
-      lastActive: '8m ago',
-      description: 'Internal analytical data query agent with read-only sandbox.',
-    },
-    {
-      id: 'email-agent',
-      name: 'email-agent',
-      status: 'Paused',
-      policy: 'Restricted v1',
-      events7d: 421,
-      blockedCount: 53,
-      blockedRate: '12.6%',
-      runtime: 'Python Autogen v0.4',
-      lastActive: '34m ago',
-      description: 'Outbound dispatch agent paused due to high risk score anomaly.',
-    },
-  ];
-
-  const agents = customAgents && customAgents.length > 0 ? customAgents : defaultAgents;
+  const agents = customAgents || [];
 
   return (
     <PixelCard className="h-full flex-1" innerClassName="p-3.5 justify-between h-full">
@@ -80,6 +29,7 @@ export const ActiveAgentsTable: React.FC<ActiveAgentsTableProps> = ({
           <h3 className="text-[13.5px] font-bold text-white tracking-tight">
             Active Agents
           </h3>
+          <span className="text-[11px] font-mono text-[#847ea8]">({agents.length})</span>
         </div>
 
         <button
@@ -91,9 +41,20 @@ export const ActiveAgentsTable: React.FC<ActiveAgentsTableProps> = ({
         </button>
       </div>
 
-      {/* Table */}
+      {/* Table or Empty State */}
       <div className="w-full overflow-x-auto my-auto py-1">
-        <table className="w-full text-left text-xs border-collapse">
+        {agents.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-7 text-center">
+            <div className="w-9 h-9 rounded-lg bg-[#2b1f59] text-[#c084fc] flex items-center justify-center mb-2 shadow-xs">
+              <PixelRobotIcon size={20} />
+            </div>
+            <span className="text-[13px] font-semibold text-white">No Agents Discovered Yet</span>
+            <span className="text-[11.5px] text-[#847ea8] mt-1 max-w-[340px] leading-relaxed">
+              Wrap your agent's tools with <code className="text-[#c084fc] bg-[#1a163a] px-1 py-0.5 rounded font-mono text-[10.5px]">@shield.protect_tool</code> or adapter to discover active agents.
+            </span>
+          </div>
+        ) : (
+          <table className="w-full text-left text-xs border-collapse">
           <thead>
             <tr className="text-[#7d77a8] text-[11px] font-medium border-b border-[#231e47]">
               <th className="pb-2 font-medium">Agent</th>
@@ -154,6 +115,7 @@ export const ActiveAgentsTable: React.FC<ActiveAgentsTableProps> = ({
             ))}
           </tbody>
         </table>
+        )}
       </div>
     </PixelCard>
   );

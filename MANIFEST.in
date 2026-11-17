@@ -1,0 +1,32 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include CHANGELOG.md
+
+recursive-include src/agentshield *.py py.typed
+recursive-include tests *.py
+
+exclude *.db
+exclude *.sqlite
+exclude *.sqlite3
+exclude .env*
+exclude vercel.json
+exclude package.json
+exclude package-lock.json
+exclude tsconfig*.json
+exclude vite.config.ts
+exclude index.html
+exclude AGENTS.md
+
+recursive-exclude src/components *
+recursive-exclude src/assets *
+recursive-exclude src/hooks *
+recursive-exclude src/api *
+recursive-exclude frontend *
+recursive-exclude node_modules *
+recursive-exclude .github *
+recursive-exclude reports *
+recursive-exclude dist *
+recursive-exclude build *
+recursive-exclude test *
+
