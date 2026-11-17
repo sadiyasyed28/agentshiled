@@ -36,8 +36,33 @@ def test_vercel_entrypoint_imports_and_exposes_fastapi_app():
     assert isinstance(vercel_entrypoint.app, FastAPI), "api/index.py app must be a FastAPI instance"
 
 
+def _get_active_branch() -> str:
+    """Safely determines the active branch without relying on remote network checks."""
+    ref_name = os.environ.get("GITHUB_REF_NAME", "")
+    if ref_name:
+        return ref_name
+    ref = os.environ.get("GITHUB_REF", "")
+    if ref.startswith("refs/heads/"):
+        return ref.replace("refs/heads/", "")
+    vercel_ref = os.environ.get("VERCEL_GIT_COMMIT_REF", "")
+    if vercel_ref:
+        return vercel_ref
+    try:
+        import subprocess
+        res = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(ROOT_DIR),
+        )
+        return res.stdout.strip()
+    except Exception:
+        return ""
+
+
 def test_vercel_json_syntax_and_route_coverage():
-    """Verifies vercel.json structure, staging proxy rewrite rules, and route coverage."""
+    """Verifies vercel.json structure, branch-specific rewrite rules, and route coverage."""
     vercel_json_path = ROOT_DIR / "vercel.json"
     assert vercel_json_path.exists(), "vercel.json must exist in project root"
 
@@ -52,10 +77,35 @@ def test_vercel_json_syntax_and_route_coverage():
     assert len(rewrites) >= 4, "vercel.json must declare all required API and SPA rewrites"
 
     destinations = [r["destination"] for r in rewrites]
-    assert any("agentshield-backend-staging.onrender.com" in d for d in destinations), (
-        "Staging preview vercel.json must route to Render staging backend"
-    )
     assert "/index.html" in destinations, "SPA fallback rewrite must route to /index.html"
+
+    # Branch-aware expectation verification
+    branch = _get_active_branch()
+    is_main = branch in ("main", "master")
+    is_staging = "feature" in branch or "staging" in branch
+
+    if is_main:
+        assert "/api/index.py" in destinations, (
+            "Production branch (main) vercel.json must route to /api/index.py serverless adapter"
+        )
+        assert not any("agentshield-backend-staging.onrender.com" in d for d in destinations), (
+            "Production configuration must never point to the staging hostname"
+        )
+    elif is_staging:
+        assert any("agentshield-backend-staging.onrender.com" in d for d in destinations), (
+            "Staging preview branch vercel.json must route to Render staging backend"
+        )
+        for r in rewrites:
+            if not r["source"].startswith("/((?!"):
+                assert r["destination"] != "/api/index.py", (
+                    "Staging configuration must never accidentally route API requests to /api/index.py"
+                )
+    else:
+        has_approved_backend = any(
+            "agentshield-backend-staging.onrender.com" in d or d == "/api/index.py"
+            for d in destinations
+        )
+        assert has_approved_backend, "vercel.json must route to an approved backend"
 
     # Helper function to resolve paths through rewrites
     def resolve_rewrite(path: str):
@@ -116,13 +166,17 @@ def test_vercel_json_syntax_and_route_coverage():
     for path in backend_test_paths:
         dest = resolve_rewrite(path)
         assert dest is not None, f"Path '{path}' did not match any rewrite rule"
-        assert "agentshield-backend-staging.onrender.com" in dest, (
-            f"Path '{path}' should route to Render staging, got {dest}"
-        )
         assert dest != "/index.html", f"Path '{path}' accidentally fell through to /index.html"
         assert "/api/api/" not in dest, f"Duplicate /api prefix generated in destination for '{path}': {dest}"
 
-    # Test that frontend static assets and SPA pages route strictly to /index.html (never to Render)
+        if is_main:
+            assert dest == "/api/index.py", f"Production path '{path}' should route to /api/index.py, got {dest}"
+        elif is_staging:
+            assert "agentshield-backend-staging.onrender.com" in dest, (
+                f"Staging path '{path}' should route to Render staging, got {dest}"
+            )
+
+    # Test that frontend static assets and SPA pages route strictly to /index.html (never to backend)
     frontend_test_paths = [
         "/",
         "/dashboard",
@@ -138,6 +192,7 @@ def test_vercel_json_syntax_and_route_coverage():
     for path in frontend_test_paths:
         dest = resolve_rewrite(path)
         assert dest == "/index.html", f"Frontend path '{path}' should fallback to /index.html, got {dest}"
+        assert dest != "/api/index.py", f"SPA route '{path}' unexpectedly routed to backend"
         assert "agentshield-backend-staging.onrender.com" not in (dest or ""), (
             f"Frontend path '{path}' was accidentally forwarded to Render: {dest}"
         )
