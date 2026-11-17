@@ -105,20 +105,26 @@ def test_telemetry_exporter_queue_limits():
         spool_enabled=False,
     )
     exporter = TelemetryExporter(cfg)
-    # Stop the worker thread so items stay in queue
-    exporter._stop_event.set()
-    if exporter._worker_thread:
-        exporter._worker_thread.join(timeout=2.0)
+    try:
+        # Stop the worker thread so items stay in queue
+        exporter._stop_event.set()
+        if exporter._worker_thread:
+            exporter._worker_thread.join(timeout=2.0)
 
-    # Fill queue to maximum
-    for i in range(5):
-        ok = exporter.record(TelemetryEvent(agent=f"agent-{i}"))
-        assert ok is True
+        # Fill queue to maximum
+        for i in range(5):
+            ok = exporter.record(TelemetryEvent(agent=f"agent-{i}"))
+            assert ok is True
 
-    # 6th item should be dropped cleanly without raising an exception
-    dropped = exporter.record(TelemetryEvent(agent="agent-overflow"))
-    assert dropped is False
-    assert exporter._queue.full()
+        # 6th item should be dropped cleanly without raising an exception
+        dropped = exporter.record(TelemetryEvent(agent="agent-overflow"))
+        assert dropped is False
+        assert exporter._queue.full()
+    finally:
+        # Drain mock queue items and close to ensure clean process termination
+        while not exporter._queue.empty():
+            exporter._queue.get_nowait()
+        exporter.close()
 
 
 def test_telemetry_exporter_retry_behavior():
@@ -160,4 +166,19 @@ def test_telemetry_exporter_retry_behavior():
         success = exporter._send_http_with_retries("http://127.0.0.1:8000/api/v1/telemetry/events", data, headers)
         assert success is False
         assert mock_urlopen.call_count == 1  # No retries on 401
+
+
+def test_telemetry_exporter_close_unregisters_atexit():
+    """Regression test: verify that close() unregisters exporter from atexit handlers."""
+    import atexit
+    cfg = TelemetryConfig(
+        api_url="http://127.0.0.1:8000",
+        api_key="mock-key",
+    )
+    with patch("atexit.unregister") as mock_unregister:
+        exporter = TelemetryExporter(cfg)
+        assert exporter._closed is False
+        exporter.close()
+        assert exporter._closed is True
+        mock_unregister.assert_called_once_with(exporter.close)
 

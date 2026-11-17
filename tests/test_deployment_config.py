@@ -37,7 +37,7 @@ def test_vercel_entrypoint_imports_and_exposes_fastapi_app():
 
 
 def test_vercel_json_syntax_and_route_coverage():
-    """Verifies vercel.json structure, rewrite rules, and that all FastAPI route paths are covered."""
+    """Verifies vercel.json structure, staging proxy rewrite rules, and route coverage."""
     vercel_json_path = ROOT_DIR / "vercel.json"
     assert vercel_json_path.exists(), "vercel.json must exist in project root"
 
@@ -52,64 +52,129 @@ def test_vercel_json_syntax_and_route_coverage():
     assert len(rewrites) >= 4, "vercel.json must declare all required API and SPA rewrites"
 
     destinations = [r["destination"] for r in rewrites]
-    assert "/api/index.py" in destinations, "At least one rewrite must route to /api/index.py"
+    assert any("agentshield-backend-staging.onrender.com" in d for d in destinations), (
+        "Staging preview vercel.json must route to Render staging backend"
+    )
     assert "/index.html" in destinations, "SPA fallback rewrite must route to /index.html"
 
-    # Compile rewrite regexes
-    compiled_rewrites = []
-    for r in rewrites:
-        source_regex = r["source"]
-        # Convert Vercel source path patterns into standard regex
-        if not source_regex.startswith("^"):
-            source_regex = f"^{source_regex}$"
-        compiled_rewrites.append((re.compile(source_regex), r["destination"]))
+    # Helper function to resolve paths through rewrites
+    def resolve_rewrite(path: str):
+        for r in rewrites:
+            source_regex = r["source"]
+            if not source_regex.startswith("^"):
+                source_regex = f"^{source_regex}$"
+            m = re.match(source_regex, path)
+            if m:
+                dest = r["destination"]
+                for i in range(1, len(m.groups()) + 1):
+                    val = m.group(i) or ""
+                    dest = dest.replace(f"${i}", val)
+                return dest
+        return None
 
-    # Test that core backend endpoints route to /api/index.py
+    # Comprehensive list of frontend API paths actually used across the application
     backend_test_paths = [
         "/health",
+        "/health/readiness",
         "/events",
         "/execute",
         "/authorize",
         "/check",
+        "/metrics",
         "/incident/reviews",
         "/incident/review",
         "/incident/incidents",
         "/incident/alerts",
+        "/incident/agents",
+        "/incident/pause",
+        "/incident/unpause",
+        "/incident/report/inc_test_123",
         "/audit/verify",
         "/api/overview",
         "/api/auth/login",
         "/api/auth/session",
         "/api/auth/logout",
+        "/api/auth/register",
+        "/api/tenant/me",
+        "/api/policies",
+        "/api/risk/factors",
+        "/api/reviews",
+        "/api/events",
+        "/api/health",
+        "/api/health/readiness",
         "/api/simulator/scenarios",
         "/api/simulator/run/scenario-prompt-injection",
         "/api/simulator/run-batch",
         "/api/simulator/history",
         "/api/simulator/summary",
         "/api/security/analyst/analyze",
+        "/api/telemetry/status",
+        "/api/api-keys",
+        "/api/config",
     ]
 
     for path in backend_test_paths:
-        matched_dest = None
-        for regex, dest in compiled_rewrites:
-            if regex.match(path):
-                matched_dest = dest
-                break
-        assert matched_dest == "/api/index.py", f"Path '{path}' should route to /api/index.py, got {matched_dest}"
+        dest = resolve_rewrite(path)
+        assert dest is not None, f"Path '{path}' did not match any rewrite rule"
+        assert "agentshield-backend-staging.onrender.com" in dest, (
+            f"Path '{path}' should route to Render staging, got {dest}"
+        )
+        assert dest != "/index.html", f"Path '{path}' accidentally fell through to /index.html"
+        assert "/api/api/" not in dest, f"Duplicate /api prefix generated in destination for '{path}': {dest}"
 
-    # Test that frontend static assets and SPA pages route to /index.html (not /api/index.py)
+    # Test that frontend static assets and SPA pages route strictly to /index.html (never to Render)
     frontend_test_paths = [
         "/",
         "/dashboard",
+        "/policies",
+        "/reviews",
+        "/incidents",
+        "/scenarios",
         "/settings",
+        "/login",
+        "/register",
         "/unknown-page",
     ]
     for path in frontend_test_paths:
-        matched_dest = None
-        for regex, dest in compiled_rewrites:
-            if regex.match(path):
-                matched_dest = dest
-                break
-        assert matched_dest == "/index.html", f"Frontend path '{path}' should fallback to /index.html, got {matched_dest}"
+        dest = resolve_rewrite(path)
+        assert dest == "/index.html", f"Frontend path '{path}' should fallback to /index.html, got {dest}"
+        assert "agentshield-backend-staging.onrender.com" not in (dest or ""), (
+            f"Frontend path '{path}' was accidentally forwarded to Render: {dest}"
+        )
+
+
+def test_production_branch_vercel_json_isolation():
+    """Verifies that the production branch vercel.json remains isolated and routes to /api/index.py."""
+    import subprocess
+
+    try:
+        res = subprocess.run(
+            ["git", "show", "main:vercel.json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(ROOT_DIR),
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            res = subprocess.run(
+                ["git", "show", "origin/main:vercel.json"],
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=str(ROOT_DIR),
+            )
+        except Exception:
+            pytest.skip("Git main branch not available for production isolation check")
+
+    prod_config = json.loads(res.stdout)
+    prod_rewrites = prod_config.get("rewrites", [])
+    prod_destinations = [r["destination"] for r in prod_rewrites]
+
+    assert "/api/index.py" in prod_destinations, "Production branch must retain /api/index.py destination"
+    assert not any("agentshield-backend-staging.onrender.com" in d for d in prod_destinations), (
+        "Production branch must not be contaminated with Render staging proxy"
+    )
 
 
 def test_canonical_readonly_environment_variable(monkeypatch):

@@ -498,6 +498,11 @@ class TelemetryExporter:
                 return True
             self._closed = True
 
+        try:
+            atexit.unregister(self.close)
+        except Exception:
+            pass
+
         all_delivered = self.flush(timeout=timeout)
         self._stop_event.set()
         if self._worker_thread and self._worker_thread.is_alive():
