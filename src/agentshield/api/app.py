@@ -359,6 +359,7 @@ def create_app(
     app.state.storage_backend = stores.backend
     app.state.rate_limiter = rate_limiter
     app.state.reliability_config = rel_config
+    app.state.seen_telemetry_ids = _seen_telemetry_ids
 
     # Rate limiters & abuse protection tracking
     public_rate_limits: Dict[str, List[float]] = {}

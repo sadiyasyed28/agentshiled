@@ -15,12 +15,30 @@ export interface ApiReadinessResponse {
   status: string;
   database: string;
   storage_backend: string;
-  audit_store: string;
-  review_store: string;
-  event_store: string;
-  analyst_provider: string;
-  circuit_breaker: string;
+  audit_store?: string;
+  review_store?: string;
+  event_store?: string;
+  analyst_provider?: string;
+  circuit_breaker?: string;
   read_only?: boolean;
+  errors?: string[];
+  message?: string;
+}
+
+export interface ApiTelemetryStatusResponse {
+  status: string;
+  tenant_id: string;
+  total_events: number;
+  active_agents_count: number;
+  last_event_timestamp?: string | null;
+  last_successful_transmission?: string | null;
+  pending_delivery: number;
+  dropped_events: number;
+  backend_exporter_pending?: number;
+  backend_exporter_dropped?: number;
+  healthy?: boolean;
+  storage_healthy?: boolean;
+  storage_error?: string | null;
 }
 
 export interface ApiOverviewStats {
@@ -204,6 +222,68 @@ export interface ApiSessionResponse {
   admin_configured?: boolean;
   expires_at?: number | null;
   csrf_token?: string | null;
+  tenant_id?: string | null;
+  role?: string | null;
+  status?: string;
+}
+
+export interface ApiSecurityAlert {
+  alert_id: string;
+  timestamp: string;
+  title: string;
+  description: string;
+  alert_type: string;
+  severity: string;
+  status: string;
+  agent_id: string;
+  trigger_event_id: string;
+  correlation_id: string;
+  incident_id?: string | null;
+  acknowledged_at?: string | null;
+  acknowledged_by?: string | null;
+  resolved_at?: string | null;
+  resolved_by?: string | null;
+  resolution_note?: string | null;
+}
+
+export interface ApiSecurityAlertsResponse {
+  alerts: ApiSecurityAlert[];
+  total: number;
+}
+
+export interface ApiAuditVerifyResponse {
+  valid: boolean;
+  total_records: number;
+  error?: string | null;
+  corrupted_record_id?: number | null;
+}
+
+export interface ApiKeyItem {
+  key_id: string;
+  tenant_id: string;
+  name: string;
+  prefix: string;
+  last_four: string;
+  masked_key: string;
+  created_at: number;
+  revoked_at?: number | null;
+  last_used_at?: number | null;
+  is_active: boolean;
+}
+
+export interface ApiKeysListResponse {
+  keys: ApiKeyItem[];
+  total: number;
+}
+
+export interface ApiKeyCreatedResponse {
+  status: string;
+  key_id: string;
+  tenant_id: string;
+  name: string;
+  masked_key: string;
+  api_key: string;
+  created_at: number;
 }
 
 export interface ApiRuntimeConfigResponse {
@@ -214,8 +294,28 @@ export interface ApiRuntimeConfigResponse {
   analyst_provider: string;
   analyst_model?: string | null;
   mock_fallback_enabled: boolean;
-  policy_version_hash: string;
-  admin_auth_configured: boolean;
+  max_tool_execution_seconds?: number;
+  max_tool_calls_per_session?: number;
+  max_arguments_bytes?: number;
+  max_body_bytes?: number;
+  max_token_budget?: number;
+  rate_limit_agent?: number;
+  rate_limit_tool?: number;
+  rate_limit_public?: number;
+  rate_limit_analyst?: number;
+  loop_consecutive_limit?: number;
+  loop_cycle_limit?: number;
+  circuit_breaker_failure_threshold?: number;
+  circuit_breaker_recovery_timeout?: number;
+  policy_version_hash?: string;
+  admin_auth_configured?: boolean;
+}
+
+export interface ApiLoginCredentials {
+  admin_key?: string;
+  email?: string;
+  password?: string;
+  tenant_id?: string;
 }
 
 // Relative URL by default so both Vercel same-origin and Vite dev proxy route cleanly
@@ -225,21 +325,43 @@ const API_BASE_URL =
 export class ApiError extends Error {
   status: number;
   data?: unknown;
+  isAuthError: boolean;
+  isForbidden: boolean;
 
   constructor(message: string, status: number, data?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
+    this.isAuthError = status === 401;
+    this.isForbidden = status === 403;
   }
 }
 
 export class ApiClient {
   private baseUrl: string;
   private csrfToken: string | null = null;
+  private authListeners: Array<(session: ApiSessionResponse | null) => void> = [];
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
+  }
+
+  onAuthChange(listener: (session: ApiSessionResponse | null) => void): () => void {
+    this.authListeners.push(listener);
+    return () => {
+      this.authListeners = this.authListeners.filter((l) => l !== listener);
+    };
+  }
+
+  private notifyAuthChange(session: ApiSessionResponse | null) {
+    this.authListeners.forEach((listener) => {
+      try {
+        listener(session);
+      } catch {
+        // ignore listener errors
+      }
+    });
   }
 
   private getCookie(name: string): string | null {
@@ -319,6 +441,10 @@ export class ApiClient {
     return this.request<ApiRuntimeConfigResponse>('/api/config');
   }
 
+  async getTelemetryStatus(): Promise<ApiTelemetryStatusResponse> {
+    return this.request<ApiTelemetryStatusResponse>('/api/telemetry/status');
+  }
+
   /* ---------------------- Auth & Session ----------------------- */
 
   async getSession(): Promise<ApiSessionResponse> {
@@ -326,17 +452,20 @@ export class ApiClient {
     if (res.csrf_token) {
       this.csrfToken = res.csrf_token;
     }
+    this.notifyAuthChange(res);
     return res;
   }
 
-  async login(adminKey: string): Promise<ApiSessionResponse> {
+  async login(credentials: string | ApiLoginCredentials): Promise<ApiSessionResponse> {
+    const payload = typeof credentials === 'string' ? { admin_key: credentials } : credentials;
     const res = await this.request<ApiSessionResponse>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ admin_key: adminKey }),
+      body: JSON.stringify(payload),
     });
     if (res.csrf_token) {
       this.csrfToken = res.csrf_token;
     }
+    this.notifyAuthChange(res);
     return res;
   }
 
@@ -345,6 +474,7 @@ export class ApiClient {
       method: 'POST',
     });
     this.csrfToken = null;
+    this.notifyAuthChange(null);
     return res;
   }
 
@@ -428,6 +558,58 @@ export class ApiClient {
     return this.request<{ agent: string; status: string }>('/api/incident/unpause', {
       method: 'POST',
       body: JSON.stringify({ agent }),
+    });
+  }
+
+  /* ------------------- Security Alerts & Incidents ------------------- */
+
+  async getSecurityAlerts(params?: {
+    status?: string;
+    severity?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ApiSecurityAlertsResponse> {
+    const q = new URLSearchParams();
+    if (params?.status) q.set('status', params.status);
+    if (params?.severity) q.set('severity', params.severity);
+    if (params?.limit) q.set('limit', String(params.limit));
+    if (params?.offset) q.set('offset', String(params.offset));
+    const qs = q.toString();
+    return this.request<ApiSecurityAlertsResponse>(
+      `/api/incident/alerts${qs ? `?${qs}` : ''}`
+    );
+  }
+
+  /* ------------------- Audit Integrity Verification ------------------- */
+
+  async verifyAuditIntegrity(): Promise<ApiAuditVerifyResponse> {
+    return this.request<ApiAuditVerifyResponse>('/api/audit/verify');
+  }
+
+  /* ---------------------- API Key Management ------------------------ */
+
+  async getApiKeys(tenantId?: string): Promise<ApiKeysListResponse> {
+    const qs = tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : '';
+    return this.request<ApiKeysListResponse>(`/api/api-keys${qs}`);
+  }
+
+  async createApiKey(req: { name: string; prefix?: string; tenant_id?: string }): Promise<ApiKeyCreatedResponse> {
+    return this.request<ApiKeyCreatedResponse>('/api/api-keys', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
+  }
+
+  async rotateApiKey(keyId: string, req?: { name?: string }): Promise<ApiKeyCreatedResponse> {
+    return this.request<ApiKeyCreatedResponse>(`/api/api-keys/${encodeURIComponent(keyId)}/rotate`, {
+      method: 'POST',
+      body: JSON.stringify(req || {}),
+    });
+  }
+
+  async revokeApiKey(keyId: string): Promise<{ status: string; key_id: string; tenant_id: string }> {
+    return this.request<{ status: string; key_id: string; tenant_id: string }>(`/api/api-keys/${encodeURIComponent(keyId)}/revoke`, {
+      method: 'POST',
     });
   }
 

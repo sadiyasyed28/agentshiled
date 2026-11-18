@@ -22,17 +22,19 @@ export const AgentDetailModal: React.FC<{
         </button>
 
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 rounded-xl bg-[#2b2559] flex items-center justify-center">
+          <div className="w-10 h-10 rounded-xl bg-[#2b2559] flex items-center justify-center text-[#c084fc]">
             <PixelRobotIcon size={24} />
           </div>
           <div>
             <h3 className="text-lg font-bold text-white font-mono">{agent.name}</h3>
-            <span className="text-xs text-[#958ec4]">{agent.runtime || 'Autonomous Agent'}</span>
+            <span className="text-xs text-[#958ec4]">
+              Runtime: {agent.runtime || 'Unavailable'}
+            </span>
           </div>
         </div>
 
         <p className="text-xs text-[#c6c1ed] mb-5 leading-relaxed bg-[#1f1c42] p-3 rounded-xl border border-[#322c61]">
-          {agent.description}
+          {agent.description || 'No custom agent description registered.'}
         </p>
 
         <div className="grid grid-cols-2 gap-3 mb-5 text-xs">
@@ -42,7 +44,7 @@ export const AgentDetailModal: React.FC<{
           </div>
           <div className="p-3 bg-[#1e1a3f] rounded-xl border border-[#312a5e]">
             <span className="text-[11px] text-[#8680b5] block">Active Policy</span>
-            <span className="text-sm font-bold text-[#c084fc] mt-0.5 block">{agent.policy}</span>
+            <span className="text-sm font-bold text-[#c084fc] mt-0.5 block">{agent.policy || 'Unassigned'}</span>
           </div>
           <div className="p-3 bg-[#1e1a3f] rounded-xl border border-[#312a5e]">
             <span className="text-[11px] text-[#8680b5] block">7-Day Event Volume</span>
@@ -50,7 +52,20 @@ export const AgentDetailModal: React.FC<{
           </div>
           <div className="p-3 bg-[#1e1a3f] rounded-xl border border-[#312a5e]">
             <span className="text-[11px] text-[#8680b5] block">Blocked Rate</span>
-            <span className="text-sm font-bold text-[#ef4444] mt-0.5 block"><AnimatedNumber value={agent.blockedCount} /> (<AnimatedNumber value={parseFloat(agent.blockedRate)} decimals={1} suffix="%" />)</span>
+            <span className="text-sm font-bold text-[#ef4444] mt-0.5 block">
+              <AnimatedNumber value={agent.blockedCount} /> (
+              <AnimatedNumber value={parseFloat(agent.blockedRate || '0')} decimals={1} suffix="%" />)
+            </span>
+          </div>
+          <div className="p-3 bg-[#1e1a3f] rounded-xl border border-[#312a5e]">
+            <span className="text-[11px] text-[#8680b5] block">Last Activity</span>
+            <span className="text-sm font-bold text-white mt-0.5 block">{agent.lastActive || 'Unavailable'}</span>
+          </div>
+          <div className="p-3 bg-[#1e1a3f] rounded-xl border border-[#312a5e]">
+            <span className="text-[11px] text-[#8680b5] block">Execution Containment</span>
+            <span className={`text-sm font-bold mt-0.5 block ${agent.status === 'Paused' ? 'text-[#facc15]' : 'text-[#4ade80]'}`}>
+              {agent.status === 'Paused' ? 'Contained' : 'Permitted'}
+            </span>
           </div>
         </div>
 

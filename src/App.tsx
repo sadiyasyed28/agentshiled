@@ -16,8 +16,34 @@ import { EventsView } from './components/events/EventsView';
 import { ReviewView } from './components/review/ReviewView';
 import { PoliciesView } from './components/policies/PoliciesView';
 import { BenchmarksView } from './components/benchmarks/BenchmarksView';
-import type { Agent, SecurityEvent, AttentionItem, AlertNotification, DecisionType } from './types';
-import { apiClient, type ApiOverviewStats, type ApiEventItem } from './api/client';
+import { LoginModal } from './components/LoginModal';
+import { SystemHealthModal } from './components/SystemHealthModal';
+import { SecuritySettingsModal } from './components/SecuritySettingsModal';
+import {
+  type HealthStatusType,
+  computeHealthStatus,
+  deriveSecurityNotifications,
+  mapServerAgentToModel,
+} from './health';
+import type {
+  Agent,
+  SecurityEvent,
+  AttentionItem,
+  AlertNotification,
+  DecisionType,
+  SecurityNotificationItem,
+  AgentStatus,
+} from './types';
+import {
+  apiClient,
+  type ApiOverviewStats,
+  type ApiEventItem,
+  type ApiSessionResponse,
+  type ApiHealthResponse,
+  type ApiReadinessResponse,
+  type ApiTelemetryStatusResponse,
+  ApiError,
+} from './api/client';
 
 export function App() {
   const getInitialTab = () => {
@@ -49,12 +75,24 @@ export function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
 
+  // Authentication session state
+  const [session, setSession] = useState<ApiSessionResponse | null>(null);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+
+  // Operational System Health state
+  const [isHealthModalOpen, setIsHealthModalOpen] = useState(false);
+  const [isSecuritySettingsOpen, setIsSecuritySettingsOpen] = useState(false);
+  const [healthStatus, setHealthStatus] = useState<HealthStatusType>('Loading');
+  const [appVersion, setAppVersion] = useState<string>('0.2.0');
+  const [appEnvironment, setAppEnvironment] = useState<string>('Staging');
+
   // Live dashboard state
   const [overviewStats, setOverviewStats] = useState<ApiOverviewStats | null>(null);
   const [liveEvents, setLiveEvents] = useState<SecurityEvent[] | null>(null);
   const [liveAgents, setLiveAgents] = useState<Agent[] | null>(null);
   const [activityData, setActivityData] = useState<DayData[] | null>(null);
   const [riskCounts, setRiskCounts] = useState<{ critical: number; high: number; medium: number; low: number } | null>(null);
+  const [notifications, setNotifications] = useState<SecurityNotificationItem[]>([]);
 
   const handleSelectTab = (tab: string) => {
     setCurrentTab(tab);
@@ -104,19 +142,87 @@ export function App() {
     setIsLoading(true);
     setApiError(null);
     try {
-      const [statsRes, eventsRes, agentsRes, policiesRes] = await Promise.allSettled([
-        apiClient.getOverview(),
-        apiClient.getEvents({ limit: 100 }),
-        apiClient.getAgents(),
-        apiClient.getPolicies(),
-      ]);
+      const [statsRes, eventsRes, agentsRes, policiesRes, healthRes, readinessRes, telemetryRes, alertsRes] =
+        await Promise.allSettled([
+          apiClient.getOverview(),
+          apiClient.getEvents({ limit: 100 }),
+          apiClient.getAgents(),
+          apiClient.getPolicies(),
+          apiClient.getHealth(),
+          apiClient.getReadiness(),
+          apiClient.getTelemetryStatus(),
+          apiClient.getSecurityAlerts({ limit: 10 }),
+        ]);
 
       let anySuccess = false;
 
+      // Real Operational Health & Diagnostics
+      let newHealth: ApiHealthResponse | null = null;
+      let newReadiness: ApiReadinessResponse | null = null;
+      let newTelemetry: ApiTelemetryStatusResponse | null = null;
+      let healthSuccess = false;
+
+      if (healthRes.status === 'fulfilled' && healthRes.value) {
+        newHealth = healthRes.value;
+        if (newHealth.version) {
+          setAppVersion(newHealth.version);
+        }
+        healthSuccess = true;
+      }
+
+      if (readinessRes.status === 'fulfilled' && readinessRes.value) {
+        newReadiness = readinessRes.value;
+        healthSuccess = true;
+      } else if (readinessRes.status === 'rejected') {
+        const reason = readinessRes.reason;
+        if (reason instanceof ApiError && reason.status === 503) {
+          const data = reason.data as Record<string, unknown> | undefined;
+          newReadiness = ((data?.detail || data) as ApiReadinessResponse | undefined) || null;
+          healthSuccess = true;
+        }
+      }
+
+      if (telemetryRes.status === 'fulfilled' && telemetryRes.value) {
+        newTelemetry = telemetryRes.value;
+        healthSuccess = true;
+      }
+
+      if (!healthSuccess) {
+        setHealthStatus('Unavailable');
+      } else {
+        const computed = computeHealthStatus(newHealth, newReadiness, newTelemetry, false);
+        setHealthStatus(computed);
+      }
+
       if (statsRes.status === 'fulfilled' && statsRes.value) {
         setOverviewStats(statsRes.value);
+        if (statsRes.value.is_read_only) {
+          setAppEnvironment('Staging (Read-Only)');
+        } else {
+          setAppEnvironment('Staging');
+        }
         anySuccess = true;
       }
+
+      // Build Honest Security Notifications
+      const rawAlerts =
+        alertsRes.status === 'fulfilled' && Array.isArray(alertsRes.value?.alerts)
+          ? alertsRes.value.alerts
+          : [];
+      const pendingReviews = statsRes.status === 'fulfilled' ? statsRes.value?.pending_reviews_count : 0;
+      const pausedList = statsRes.status === 'fulfilled' ? statsRes.value?.paused_agents : [];
+
+      const derivedNotifications = deriveSecurityNotifications(rawAlerts, pendingReviews, pausedList);
+      derivedNotifications.forEach((notif) => {
+        if (notif.id.startsWith('alert-')) {
+          notif.onAction = () => handleSelectTab('Events');
+        } else if (notif.id === 'notif-pending-reviews') {
+          notif.onAction = () => handleSelectTab('Review');
+        } else if (notif.id === 'notif-paused-agents') {
+          notif.onAction = () => handleSelectTab('Policies');
+        }
+      });
+      setNotifications(derivedNotifications);
 
       const rawEvents: ApiEventItem[] =
         eventsRes.status === 'fulfilled' && eventsRes.value?.events
@@ -195,30 +301,20 @@ export function App() {
 
       let discoveredAgents: Agent[] = [];
       if (serverDiscovered && serverDiscovered.length > 0) {
-        discoveredAgents = serverDiscovered.map((a) => ({
-          id: a.name,
-          name: a.name,
-          status: a.is_paused ? 'Paused' : 'Active',
-          policy: 'Enforced Policy',
-          events7d: a.total_events,
-          blockedCount: a.blocked_count,
-          blockedRate: a.total_events > 0 ? `${((a.blocked_count / a.total_events) * 100).toFixed(1)}%` : '0.0%',
-          runtime: 'Agent Runtime',
-          lastActive: a.last_active ? new Date(a.last_active).toLocaleTimeString() : 'No recent activity',
-          description: `Autonomous agent '${a.name}' under AgentShield runtime protection.`,
-        }));
+        const policyAgents = policiesRes.status === 'fulfilled' ? policiesRes.value?.agents : undefined;
+        discoveredAgents = serverDiscovered.map((a) => mapServerAgentToModel(a, policyAgents));
       } else {
         discoveredAgents = Array.from(agentMap.entries()).map(([name, data]) => ({
           id: name,
           name,
-          status: paused.includes(name) ? 'Paused' : 'Active',
+          status: (paused.includes(name) ? 'Paused' : 'Active') as AgentStatus,
           policy: data.policy,
           events7d: data.total,
           blockedCount: data.blocked,
           blockedRate: data.total > 0 ? `${((data.blocked / data.total) * 100).toFixed(1)}%` : '0.0%',
-          runtime: 'Agent Runtime',
-          lastActive: data.lastTime ? new Date(data.lastTime).toLocaleTimeString() : 'No recent activity',
-          description: `Autonomous agent '${name}' under AgentShield runtime protection.`,
+          runtime: undefined,
+          lastActive: data.lastTime ? new Date(data.lastTime).toLocaleString() : undefined,
+          description: undefined,
         }));
       }
 
@@ -226,17 +322,56 @@ export function App() {
 
       if (!anySuccess) {
         setApiError('Unable to connect to AgentShield API. Check server status.');
+        setHealthStatus('Unavailable');
+        setNotifications([]);
       }
     } catch {
       setApiError('Unable to connect to AgentShield API. Check server status.');
+      setHealthStatus('Unavailable');
+      setNotifications([]);
     } finally {
       setIsLoading(false);
     }
   }, []);
 
+  const checkSession = useCallback(async () => {
+    try {
+      const res = await apiClient.getSession();
+      setSession(res);
+      return res;
+    } catch {
+      setSession({ authenticated: false, read_only: false, admin_configured: false });
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
+    const unsub = apiClient.onAuthChange((newSession) => {
+      setSession(newSession);
+    });
+    checkSession();
     fetchDashboardData();
-  }, [fetchDashboardData]);
+    return () => unsub();
+  }, [checkSession, fetchDashboardData]);
+
+  const handleLoginSuccess = async (newSession: ApiSessionResponse) => {
+    setSession(newSession);
+    setIsLoginModalOpen(false);
+    await fetchDashboardData();
+  };
+
+  const handleLogout = async () => {
+    try {
+      await apiClient.logout();
+    } finally {
+      setSession({
+        authenticated: false,
+        read_only: session?.read_only || false,
+        admin_configured: session?.admin_configured || false,
+      });
+      await fetchDashboardData();
+    }
+  };
 
   // Global CMD + K shortcut
   useEffect(() => {
@@ -252,42 +387,27 @@ export function App() {
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    await fetchDashboardData();
+    await Promise.allSettled([checkSession(), fetchDashboardData()]);
     setIsRefreshing(false);
-    setActiveAlert({
-      id: `alert-${Date.now()}`,
-      agent: 'email-agent',
-      reason: 'Outbound volume threshold exceeded under Restricted v1 policy.',
-      riskScore: 68,
-      severity: 'warning',
-      timestamp: 'Just now',
-    });
   };
 
   const handleAttentionSelect = (item: AttentionItem) => {
-    if (item.id === 'paused-agent') {
-      setSelectedAgent({
-        id: 'email-agent',
-        name: 'email-agent',
-        status: 'Paused',
-        policy: 'Restricted v1',
-        events7d: 421,
-        blockedCount: 53,
-        blockedRate: '12.6%',
-        runtime: 'Python Autogen v0.4',
-        lastActive: '34m ago',
-        description: 'Outbound dispatch agent paused due to high risk score anomaly.',
-      });
-    } else {
-      setSelectedEvent({
-        id: `attn-${item.id}`,
-        agent: 'ops-agent',
-        action: item.text,
-        decision: item.severity === 'red' ? 'Blocked' : 'Review',
-        riskScore: item.severity === 'red' ? 87 : 68,
-        timestamp: 'Recently',
-        reason: item.details,
-      });
+    if (item.id === 'review-actions') {
+      handleSelectTab('Review');
+    } else if (item.id === 'paused-agent') {
+      const pausedAgent = liveAgents?.find((a) => a.status === 'Paused');
+      if (pausedAgent) {
+        setSelectedAgent(pausedAgent);
+      } else {
+        handleSelectTab('Policies');
+      }
+    } else if (item.id === 'high-risk') {
+      const highestRisk = liveEvents?.find((e) => e.riskScore >= 61);
+      if (highestRisk) {
+        setSelectedEvent(highestRisk);
+      } else {
+        handleSelectTab('Events');
+      }
     }
   };
 
@@ -301,6 +421,10 @@ export function App() {
         onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
+        pendingReviewsCount={overviewStats?.pending_reviews_count ?? 0}
+        environment={appEnvironment}
+        version={appVersion}
+        isReadOnly={overviewStats?.is_read_only ?? false}
       />
 
       {/* 2. MAIN VIEW CONTAINER */}
@@ -316,17 +440,29 @@ export function App() {
           onToggleMobileMenu={() => setIsMobileMenuOpen(true)}
           isCollapsed={isSidebarCollapsed}
           onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+          session={session}
+          onOpenLogin={() => setIsLoginModalOpen(true)}
+          onLogout={handleLogout}
+          onOpenSecuritySettings={() => setIsSecuritySettingsOpen(true)}
+          healthStatus={healthStatus}
+          onOpenHealth={() => setIsHealthModalOpen(true)}
+          notifications={notifications}
         />
 
         {/* Tab Body View */}
         {currentTab === 'Benchmarks' ? (
           <BenchmarksView />
         ) : currentTab === 'Policies' ? (
-          <PoliciesView />
+          <PoliciesView
+            session={session}
+            onOpenLogin={() => setIsLoginModalOpen(true)}
+          />
         ) : currentTab === 'Review' ? (
           <ReviewView
             onRefreshGlobal={handleRefresh}
             isRefreshingGlobal={isRefreshing}
+            session={session}
+            onOpenLogin={() => setIsLoginModalOpen(true)}
           />
         ) : currentTab === 'Events' ? (
           <EventsView
@@ -447,9 +583,17 @@ export function App() {
       <CommandPalette
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
-        onSelectAction={(actionName) => {
-          console.log('Action selected:', actionName);
-        }}
+        onNavigateTab={handleSelectTab}
+        onOpenHealth={() => setIsHealthModalOpen(true)}
+        onRefresh={handleRefresh}
+        onOpenLogin={() => setIsLoginModalOpen(true)}
+        onLogout={handleLogout}
+        onOpenSecuritySettings={() => setIsSecuritySettingsOpen(true)}
+        session={session}
+        agents={liveAgents}
+        events={liveEvents}
+        onSelectAgent={setSelectedAgent}
+        onSelectEvent={setSelectedEvent}
       />
 
       {/* 5. AGENT DETAIL MODAL */}
@@ -462,6 +606,31 @@ export function App() {
       <EventDetailModal
         event={selectedEvent}
         onClose={() => setSelectedEvent(null)}
+      />
+
+      {/* 7. ADMIN LOGIN MODAL */}
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
+        onSuccess={handleLoginSuccess}
+      />
+
+      {/* 8. SYSTEM HEALTH DIAGNOSTICS MODAL */}
+      <SystemHealthModal
+        isOpen={isHealthModalOpen}
+        onClose={() => setIsHealthModalOpen(false)}
+        onHealthLoaded={(status, version) => {
+          if (status) setHealthStatus(status);
+          if (version) setAppVersion(version);
+        }}
+      />
+
+      {/* 9. SECURITY SETTINGS & API KEYS MODAL */}
+      <SecuritySettingsModal
+        isOpen={isSecuritySettingsOpen}
+        onClose={() => setIsSecuritySettingsOpen(false)}
+        session={session}
+        onOpenLogin={() => setIsLoginModalOpen(true)}
       />
     </div>
   );

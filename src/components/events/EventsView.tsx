@@ -7,7 +7,7 @@ import { EventDrawer } from './EventDrawer';
 import { PixelLayersIcon } from '../pixel/PixelIcons';
 import { ALL_EVENTS } from './eventsData';
 import type { SecurityEventRecord, EventsFilterState, EventDecision, ExecutionStatus } from './eventsTypes';
-import { apiClient, type ApiEventItem } from '../../api/client';
+import { apiClient, type ApiEventItem, type ApiAuditVerifyResponse, ApiError } from '../../api/client';
 
 interface EventsViewProps {
   onRefreshGlobal?: () => void;
@@ -40,6 +40,35 @@ export const EventsView: React.FC<EventsViewProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [showDemoDataset, setShowDemoDataset] = useState(false);
+
+  // Audit Hash Chain Verification State
+  const [isVerifyingAudit, setIsVerifyingAudit] = useState(false);
+  const [auditVerifyResult, setAuditVerifyResult] = useState<ApiAuditVerifyResponse | null>(null);
+  const [auditVerifyError, setAuditVerifyError] = useState<string | null>(null);
+
+  const handleVerifyAudit = async () => {
+    setIsVerifyingAudit(true);
+    setAuditVerifyResult(null);
+    setAuditVerifyError(null);
+    try {
+      const res = await apiClient.verifyAuditIntegrity();
+      setAuditVerifyResult(res);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        if (err.status === 403) {
+          setAuditVerifyError('Verification Forbidden (403): Global administrator privilege required to verify audit hash chain.');
+        } else if (err.status === 401) {
+          setAuditVerifyError('Authentication Required (401): Please sign in to verify audit integrity.');
+        } else {
+          setAuditVerifyError(`Audit verification failed (${err.status}): ${err.message}`);
+        }
+      } else {
+        setAuditVerifyError('Failed to verify audit hash chain: Network or server error.');
+      }
+    } finally {
+      setIsVerifyingAudit(false);
+    }
+  };
 
   // Selected event for detail drawer
   const [selectedEvent, setSelectedEvent] = useState<SecurityEventRecord | null>(null);
@@ -383,7 +412,80 @@ export const EventsView: React.FC<EventsViewProps> = ({
             onExport={handleExport}
             dateRange={dateRange}
             onDateRangeChange={setDateRange}
+            onVerifyAudit={handleVerifyAudit}
+            isVerifyingAudit={isVerifyingAudit}
           />
+
+          {/* AUDIT HASH CHAIN VERIFICATION STATUS BANNER */}
+          {isVerifyingAudit && (
+            <div className="mb-3 p-3 bg-[#1e1a3d] border border-[#6d3ee8] rounded-xl text-xs font-mono flex items-center gap-3 text-[#c4bbf0] shadow-sm animate-pulse">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#a855f7] animate-ping" />
+              <span>Cryptographic Verification In Progress: Recomputing SHA-256 hash chain over all persisted audit events...</span>
+            </div>
+          )}
+
+          {auditVerifyResult && (
+            <div
+              className={`mb-3 p-3.5 rounded-xl border text-xs font-mono flex items-start justify-between gap-3 shadow-md ${
+                auditVerifyResult.valid
+                  ? 'bg-[#153e28]/90 border-[#22c55e] text-[#bbf7d0]'
+                  : 'bg-[#4a1c25]/90 border-[#ef4444] text-[#fca5a5]'
+              }`}
+            >
+              <div className="space-y-1">
+                <div className="font-bold flex items-center gap-2 text-[13px]">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      auditVerifyResult.valid ? 'bg-[#22c55e]' : 'bg-[#ef4444]'
+                    }`}
+                  />
+                  {auditVerifyResult.valid
+                    ? 'Audit Hash-Chain Verified: Cryptographic Integrity Confirmed'
+                    : 'Audit Integrity Failure: Tampering or Sequence Corruption Detected!'}
+                </div>
+                <div className="text-[11.5px] opacity-90">
+                  {auditVerifyResult.valid ? (
+                    <span>
+                      SHA-256 integrity verified across all {auditVerifyResult.total_records} audit records. Zero sequence gaps or altered digests detected.
+                    </span>
+                  ) : (
+                    <span>
+                      Total records checked: {auditVerifyResult.total_records}. Error: {auditVerifyResult.error || 'Hash mismatch'}.
+                      {auditVerifyResult.corrupted_record_id !== undefined && auditVerifyResult.corrupted_record_id !== null && (
+                        <span className="font-semibold text-white ml-1">
+                          Corrupted record ID: {auditVerifyResult.corrupted_record_id}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={() => setAuditVerifyResult(null)}
+                className="px-2 py-1 bg-black/30 hover:bg-black/50 border border-white/20 rounded text-[10px] text-white transition-colors cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {auditVerifyError && (
+            <div className="mb-3 p-3.5 bg-[#401a24] border border-[#f87171] rounded-xl text-xs font-mono flex items-start justify-between gap-3 text-[#fecaca] shadow-md">
+              <div className="space-y-1">
+                <div className="font-bold flex items-center gap-2 text-[13px] text-[#f87171]">
+                  <span className="w-2 h-2 rounded-full bg-[#f87171]" />
+                  Audit Verification Unavailable
+                </div>
+                <div className="text-[11.5px] text-[#fca5a5]">{auditVerifyError}</div>
+              </div>
+              <button
+                onClick={() => setAuditVerifyError(null)}
+                className="px-2 py-1 bg-black/30 hover:bg-black/50 border border-white/20 rounded text-[10px] text-white transition-colors cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           {/* 2. KPI CARDS SECTION */}
           <EventsKpiSection events={activeDataset} />

@@ -52,3 +52,14 @@ export interface AlertNotification {
   timestamp: string;
 }
 
+export interface SecurityNotificationItem {
+  id: string;
+  title: string;
+  message: string;
+  severity: 'critical' | 'high' | 'warning' | 'info';
+  timestamp?: string;
+  agent?: string;
+  riskScore?: number;
+  onAction?: () => void;
+}
+

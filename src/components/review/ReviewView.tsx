@@ -13,16 +13,20 @@ import {
   INITIAL_EXPIRED_REQUESTS,
 } from './reviewData';
 import type { ReviewRequest, ReviewStatus, ReviewFilterState } from './reviewTypes';
-import { apiClient, type ApiPendingReview } from '../../api/client';
+import { apiClient, type ApiPendingReview, type ApiSessionResponse, ApiError } from '../../api/client';
 
 interface ReviewViewProps {
   onRefreshGlobal?: () => void;
   isRefreshingGlobal?: boolean;
+  session?: ApiSessionResponse | null;
+  onOpenLogin?: () => void;
 }
 
 export const ReviewView: React.FC<ReviewViewProps> = ({
   onRefreshGlobal,
   isRefreshingGlobal = false,
+  session,
+  onOpenLogin,
 }) => {
   // Datasets for all 4 statuses
   const [pendingList, setPendingList] = useState<ReviewRequest[]>([]);
@@ -258,6 +262,12 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
 
   // Handle Approve
   const handleApprove = async (req: ReviewRequest) => {
+    if (!session?.authenticated) {
+      showNotification('Administrative authentication required to approve reviews.');
+      if (onOpenLogin) onOpenLogin();
+      return;
+    }
+
     try {
       await apiClient.submitReview(req.id, 'approve');
 
@@ -279,14 +289,30 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
       }
 
       showNotification(`Request ${req.id} approved on server.`);
+      if (onRefreshGlobal) onRefreshGlobal();
     } catch (err: unknown) {
-      const msg = (err as Error)?.message || 'Server error approving review';
-      showNotification(`Approval Failed: ${msg}`);
+      if (err instanceof ApiError) {
+        if (err.status === 403) {
+          showNotification('Operation Blocked (403): Read-only mode or insufficient privileges prevent approving reviews.');
+        } else if (err.status === 401) {
+          showNotification('Authentication Required (401): Please sign in to approve reviews.');
+        } else {
+          showNotification(`Approval Failed (${err.status}): ${err.message}`);
+        }
+      } else {
+        const msg = (err as Error)?.message || 'Server error approving review';
+        showNotification(`Approval Failed: ${msg}`);
+      }
     }
   };
 
   // Handle Deny Trigger
   const handleDenyClick = (req: ReviewRequest) => {
+    if (!session?.authenticated) {
+      showNotification('Administrative authentication required to deny reviews.');
+      if (onOpenLogin) onOpenLogin();
+      return;
+    }
     setDenyingRequest(req);
   };
 
@@ -319,9 +345,20 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
 
       setDenyingRequest(null);
       showNotification(`Request ${req.id} was rejected on server.`);
+      if (onRefreshGlobal) onRefreshGlobal();
     } catch (err: unknown) {
-      const msg = (err as Error)?.message || 'Server error denying review';
-      showNotification(`Denial Failed: ${msg}`);
+      if (err instanceof ApiError) {
+        if (err.status === 403) {
+          showNotification('Operation Blocked (403): Read-only mode or insufficient privileges prevent rejecting reviews.');
+        } else if (err.status === 401) {
+          showNotification('Authentication Required (401): Please sign in to reject reviews.');
+        } else {
+          showNotification(`Denial Failed (${err.status}): ${err.message}`);
+        }
+      } else {
+        const msg = (err as Error)?.message || 'Server error denying review';
+        showNotification(`Denial Failed: ${msg}`);
+      }
     }
   };
 
@@ -339,6 +376,26 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
         <div className="fixed top-20 right-8 z-50 px-4 py-2.5 rounded-xl bg-[#221c45] border border-[#6d3ee8] text-white text-xs font-semibold shadow-2xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2 duration-150">
           <span className="w-2 h-2 rounded-full bg-[#22c55e] animate-ping" />
           <span>{actionNotification}</span>
+        </div>
+      )}
+
+      {/* AUTHENTICATION REQUIRED BANNER */}
+      {!session?.authenticated && (
+        <div className="mb-3.5 p-3.5 bg-[#241740] border border-[#6d3ee8]/60 rounded-xl flex items-center justify-between text-xs shadow-md">
+          <div className="flex items-center gap-2.5 text-[#d8b4fe]">
+            <span className="w-2 h-2 rounded-full bg-[#facc15] animate-pulse" />
+            <span>
+              <strong>Administrative Session Required:</strong> Sign in with your administrative key to review, approve, or reject tool execution proposals.
+            </span>
+          </div>
+          {onOpenLogin && (
+            <button
+              onClick={onOpenLogin}
+              className="px-3.5 py-1.5 bg-[#6d3ee8] hover:bg-[#7e50f5] text-white rounded-lg font-semibold text-xs transition-colors cursor-pointer flex-shrink-0 shadow-sm"
+            >
+              Sign In as Admin
+            </button>
+          )}
         </div>
       )}
 
