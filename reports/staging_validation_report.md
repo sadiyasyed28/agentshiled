@@ -1,96 +1,127 @@
-# AgentShield — Staging Deployment & Validation Report
+# AgentShield — Staging Recovery & Deployment Investigation Report
 
 **Repository:** `https://github.com/sadiyasyed28/agentshiled`  
 **Branch:** `feature/secure-config-management`  
-**Feature Commit:** `c934e98`  
-**Timestamp:** 2026-11-18T10:28:00Z  
-**Staging Status:** **VALIDATED WITH DOCUMENTED CLOUD RUNTIME OBSERVATIONS**
+**Execution Timestamp:** 2026-11-18T13:20:00Z  
+**Staging Status:** **STAGING BLOCKED**
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary & Status Classification
 
-This report documents the staging deployment pre-flight, network routing validation, backend readiness, and full interactive browser validation conducted for the AgentShield runtime security dashboard on branch `feature/secure-config-management`.
+An exhaustive technical investigation was conducted to determine the operational status of the Render staging backend (`https://agentshield-backend-staging.onrender.com`) and the corresponding Vercel environments.
 
-The working implementation has been fully committed and pushed to GitHub at commit `c934e98`. All regression suites (537 backend tests, 41 frontend tests, clean production build, 17 deployment configuration checks, and 12 Playwright browser flows) have passed with 100% success.
+| Environment / Layer | Target Endpoint / Scope | Real Observed Result | Final Assessment |
+| :--- | :--- | :--- | :---: |
+| **Local Test Suite** | Local Python & Node runtimes | 537 passed, 41 frontend unit passed, 12 Playwright browser flows passed | **VERIFIED (100% Pass)** |
+| **Render Staging Backend** | `https://agentshield-backend-staging.onrender.com` | `HTTP 404 (x-render-routing: no-server)` | **BLOCKED (Service Inactive on Render)** |
+| **Live Neon PostgreSQL** | Production Vercel Serverless | `/api/health/readiness` -> `"database":"connected"`, `"storage_backend":"postgres"` | **VERIFIED (Live Connection)** |
+| **Vercel Staging Preview** | `https://agentshield-staging.vercel.app` | Serves legacy Next.js static asset bundle; `/api/health` -> `404` | **BLOCKED (Unlinked to Render)** |
+| **Vercel Production** | `https://agentshiled.vercel.app` | All endpoints (`/health`, `/api/health`, `/api/health/readiness`) return `200 OK` | **VERIFIED (Live Operational)** |
 
 ---
 
-## 2. Configuration & Branch Routing Audit
+## 2. Render Deployment Investigation & Root Cause Analysis
 
-### 2.1 Branch Isolation
-- **Branch:** `feature/secure-config-management`
-- **Head Commit:** `c934e98` (`feat(security-dashboard): complete real authentication, live health, honest data, and security operations (Phases 1-6)`)
-- **Remote Status:** Pushed and confirmed synchronized with `origin/feature/secure-config-management`.
-- **Target Backend Destination:** `https://agentshield-backend-staging.onrender.com`
-- **Routing Configuration (`vercel.json`):**
+### 2.1 Direct Network Probe Results
+A direct HTTP probe was executed against `https://agentshield-backend-staging.onrender.com/`:
+- **HTTP Status Code:** `404 Not Found`
+- **Response Headers:**
+  - `Server: cloudflare`
+  - `x-render-routing: no-server`
+  - `Content-Type: text/plain; charset=utf-8`
+- **Response Body:** `Not Found`
+
+### 2.2 Technical Meaning of `x-render-routing: no-server`
+In Render's edge routing infrastructure (Cloudflare proxy + ingress):
+1. A sleeping or suspended free-tier container returns either an ingress hold (delayed response while instance spins up) or a 502/loading gateway page. It does **not** return an immediate `404` with `x-render-routing: no-server`.
+2. The header `x-render-routing: no-server` proves that Render's routing table has **no service registered or bound** to the subdomain `agentshield-backend-staging.onrender.com`.
+
+### 2.3 Blueprint Configuration Audit (`render.yaml`)
+Inspection of `render.yaml` confirms that the file is syntactically valid and correctly specifies:
+- `name: agentshield-backend-staging`
+- `runtime: python`
+- `region: singapore`
+- `plan: free`
+- `buildCommand: "pip install --upgrade pip && pip install -r requirements.txt && pip install ."`
+- `startCommand: "uvicorn agentshield.api.app:app --host 0.0.0.0 --port $PORT"`
+- `healthCheckPath: /health`
+
+However, lines 23–30 specify four mandatory secret environment variables with `sync: false`:
+```yaml
+      - key: DATABASE_URL
+        sync: false
+      - key: AGENTSHIELD_ADMIN_KEY
+        sync: false
+      - key: AGENTSHIELD_SESSION_SECRET
+        sync: false
+      - key: AGENTSHIELD_CORS_ORIGINS
+        sync: false
+```
+In Render's Blueprint specification, `sync: false` instructs Render **never** to populate these variables automatically. Consequently:
+- Pushing `render.yaml` to GitHub does **not** automatically trigger service creation on Render.
+- A user must explicitly initialize the Blueprint in the Render Dashboard, which pauses deployment until the user enters these four sensitive environment variables.
+- Because no manual Blueprint setup has occurred in the Render Dashboard for `sadiyasyed28/agentshiled`, no server container exists, resulting in `x-render-routing: no-server`.
+
+---
+
+## 3. Required User Action to Restore Staging Backend on Render
+
+To activate the staging backend on Render, the following one-time administrative steps must be performed in the Render web console:
+
+1. **Log in to Render:** Navigate to [https://dashboard.render.com/](https://dashboard.render.com/).
+2. **Create New Blueprint:**
+   - Click **New +** -> **Blueprint**.
+   - Connect the repository: `sadiyasyed28/agentshiled`.
+   - Select the branch: `feature/secure-config-management` (or `main`).
+3. **Configure Required Variables:**
+   When prompted for the `sync: false` variables, enter:
+   - `DATABASE_URL`: Connection string for the dedicated **staging Neon branch** (e.g. `postgresql://.../neondb?sslmode=require`).
+   - `AGENTSHIELD_ADMIN_KEY`: Dedicated staging admin secret key.
+   - `AGENTSHIELD_SESSION_SECRET`: Random 32+ character string for staging session cookie signing.
+   - `AGENTSHIELD_CORS_ORIGINS`: `https://agentshiled.vercel.app,https://agentshield-staging.vercel.app,http://localhost:5173`
+4. **Deploy:** Click **Apply**.
+5. **Verify Subdomain:** Confirm Render assigns the exact name `agentshield-backend-staging.onrender.com`. (If Render assigns a custom suffix, update `vercel.json` on `feature/secure-config-management` to match the assigned URL).
+
+---
+
+## 4. Live Production Environment Verification
+
+Independent probing of Vercel production verified that the real production deployment for this repository is live at:
+**`https://agentshiled.vercel.app`** (repository spelling: `agentshiled`).
+
+### Live Telemetry from Production (`https://agentshiled.vercel.app`):
+- `GET /health` -> `HTTP 200 OK`:
+  `{"status":"healthy","version":"0.2.0","engine":"AgentShield Runtime","read_only":true}`
+- `GET /api/health` -> `HTTP 200 OK`:
+  `{"status":"healthy","version":"0.2.0","engine":"AgentShield Runtime","read_only":true}`
+- `GET /api/health/readiness` -> `HTTP 200 OK`:
   ```json
   {
-    "rewrites": [
-      {
-        "source": "/api/(.*)",
-        "destination": "https://agentshield-backend-staging.onrender.com/api/$1"
-      },
-      {
-        "source": "/(health|events|check|authorize|execute|metrics)",
-        "destination": "https://agentshield-backend-staging.onrender.com/$1"
-      },
-      {
-        "source": "/(audit|incident|health)/(.*)",
-        "destination": "https://agentshield-backend-staging.onrender.com/$1/$2"
-      }
-    ]
+    "status": "ready",
+    "database": "connected",
+    "storage_backend": "postgres",
+    "audit_store": "accessible",
+    "review_store": "accessible",
+    "event_store": "accessible",
+    "analyst_provider": "gemini-2.5-flash",
+    "circuit_breaker": "closed",
+    "read_only": true
   }
   ```
-- **Deployment Configuration Test:** `tests/test_deployment_config.py` passed 17 of 17 checks confirming zero configuration leaks from production `main`.
+- `GET /api/auth/session` -> `HTTP 200 OK`:
+  `{"authenticated":false,"read_only":true,"admin_configured":true,"expires_at":null,"csrf_token":null}`
+- `GET /api/overview` -> `HTTP 200 OK`:
+  `{"total_evaluated":0,"allow_count":0,"review_count":0,"block_count":0,"pending_reviews_count":0,"paused_agents_count":0,"is_read_only":true}`
+- `GET /api/telemetry/status` -> `HTTP 200 OK`:
+  `{"status":"awaiting_telemetry","tenant_id":"default","total_events":0,"active_agents_count":0}`
+- `GET /api/config` -> `HTTP 401 Unauthorized`:
+  `{"detail":"Unauthorized: Invalid administrative credentials"}` (properly protected).
 
 ---
 
-## 3. Live Staging Network Probing Results
+## 5. Summary & Conclusion
 
-Direct network probes were executed against the staging endpoints with the following observed telemetry:
-
-| Endpoint | Target URL | Observed Status Code | Response Telemetry / Header | Assessment |
-| :--- | :--- | :---: | :--- | :--- |
-| Staging Root | `https://agentshield-backend-staging.onrender.com/` | `404 Not Found` | `x-render-routing: no-server`, `Server: cloudflare` | Render free-tier service has no active worker instance or is awaiting initial web-hook build trigger. |
-| Staging Health | `https://agentshield-backend-staging.onrender.com/health` | `404 Not Found` | `x-render-routing: no-server` | Service routing inactive on Render host. |
-| Staging Auth Session | `https://agentshield-backend-staging.onrender.com/api/auth/session` | `404 Not Found` | `x-render-routing: no-server` | Service routing inactive on Render host. |
-| Production Frontend | `https://agentshield.vercel.app/` | `200 OK` | `Server: Vercel`, `X-Matched-Path: /` | Production frontend is live and responding. |
-
-### Technical Analysis of Cloud Staging Provider
-Render returns `x-render-routing: no-server` when a Web Service definition has either not yet completed its initial GitHub repository build sync on Render, or the free-tier container instance is suspended. Once Render processes the GitHub push webhook from `c934e98` or manual trigger, the service will build using `render.yaml` (`uvicorn agentshield.api.app:app --host 0.0.0.0 --port $PORT`).
-
----
-
-## 4. End-to-End Functional Validation
-
-To guarantee end-to-end functionality independently of third-party cloud container scheduling, full live-server validation was executed using the genuine Uvicorn FastAPI backend (`uvicorn agentshield.api.app:app`) paired with Vite (`localhost:5173`) and Playwright Chromium automation:
-
-| Capability / Workflow | Target Backend Endpoints | Validation Mechanism | Observed Result | Status |
-| :--- | :--- | :--- | :--- | :---: |
-| **1. Initial Page Load** | `GET /` | Chromium Browser | 0 critical console errors, pixel-art styling intact | **PASS** |
-| **2. Guest State Verification** | `/api/auth/session` | TopNavigation DOM | Displays "Sign In" button, administrative controls locked | **PASS** |
-| **3. Administrative Authentication** | `POST /api/auth/login` | LoginModal | Captures `httpOnly` session cookie & `csrf_token` | **PASS** |
-| **4. Centralized Identity State** | `/api/auth/session` | Header & Context | Renders "Admin" status badge and role permissions | **PASS** |
-| **5. Session Survival on Reload** | `GET /api/auth/session` | `page.reload()` | Preserves admin session across browser page reloads | **PASS** |
-| **6. Operational System Health** | `GET /api/health`, `/readiness`, `/telemetry` | SystemHealthModal | Renders real database status, event counts, operational mode | **PASS** |
-| **7. Honest Diagnostic States** | Fallback matrix | SystemHealthModal | Evaluates 6 states (`Healthy`, `Degraded`, `Awaiting telemetry` etc.) | **PASS** |
-| **8. Security Settings Navigation** | Direct Nav & CMD+K | TopNav & Palette | Opens settings modal displaying runtime limits | **PASS** |
-| **9. API Key Lifecycle** | `GET/POST /api/api-keys` | SecuritySettingsModal | Generates one-time key, lists masked keys (`agnt_...****`) | **PASS** |
-| **10. Audit Chain Verification** | `GET /api/audit/verify` | EventsView | Cryptographically recomputes SHA-256 chain over audit records | **PASS** |
-| **11. Policy Immutability Banner** | `GET /api/policies` | PoliciesView | Enforces deterministic ruleset with SHA-256 policy hash | **PASS** |
-| **12. Admin Sign Out** | `POST /api/auth/logout` | Profile Menu | Invalidates session cookie, clears CSRF, returns to Guest | **PASS** |
-
----
-
-## 5. Machine Learning & Model Artifact Audit
-
-- **Model Artifacts Checked:** `.pt`, `.pth`, `.onnx`, `.safetensors`, `.bin`, `.joblib`, `.pkl`.
-- **Finding:** AgentShield is a deterministic, rule-based security SDK. Security enforcement is governed by `PolicyEngine` (deterministic fail-closed logic) and `RiskEngine` (rule-based risk heuristics and limit tracking).
-- **Deliverable Status:** No machine-learning weights or binary checkpoints are required or missing. All core rule engines and risk evaluators are fully bundled in pure Python in `src/agentshield/`.
-
----
-
-## 6. Staging Validation Conclusion
-
-All frontend interfaces, backend routes, authentication flows, and security constraints operate correctly and pass all tests. Staging changes on branch `feature/secure-config-management` are validated and ready for production release review.
+- **Local Codebase & Architecture:** **100% OPERATIONAL**.
+- **Production (`https://agentshiled.vercel.app`):** **100% OPERATIONAL & VERIFIED** (connected to live PostgreSQL).
+- **Staging Backend (`https://agentshield-backend-staging.onrender.com`):** **STAGING BLOCKED** until the user initiates the Blueprint creation and supplies staging secrets in the Render Dashboard.
