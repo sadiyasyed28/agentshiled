@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   PixelShieldIcon,
   PixelHouseIcon,
@@ -10,6 +10,7 @@ import {
 import { PixelKnightIllustration } from './pixel/PixelKnightIllustration';
 import { AnimatedNumber } from './pixel/AnimatedNumber';
 import { ChevronDown, Check, ChevronLeft, ChevronRight } from 'lucide-react';
+import { computeReviewBadge, formatVersion } from '../health';
 
 interface SidebarProps {
   currentTab: string;
@@ -18,6 +19,10 @@ interface SidebarProps {
   onToggleCollapse?: () => void;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
+  pendingReviewsCount?: number;
+  environment?: string;
+  version?: string;
+  isReadOnly?: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -27,19 +32,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapse,
   isOpenMobile = false,
   onCloseMobile,
+  pendingReviewsCount,
+  environment = 'Staging',
+  version = '0.2.0',
+  isReadOnly = false,
 }) => {
   const [envOpen, setEnvOpen] = useState(false);
-  const [currentEnv, setCurrentEnv] = useState<'Development' | 'Staging' | 'Production'>('Development');
+  const [selectedEnv, setSelectedEnv] = useState<string>(environment);
+
+  useEffect(() => {
+    if (environment) {
+      setSelectedEnv(environment);
+    }
+  }, [environment]);
 
   const navItems = [
     { id: 'Overview', label: 'Overview', icon: PixelHouseIcon },
     { id: 'Events', label: 'Events', icon: PixelLayersIcon },
-    { id: 'Review', label: 'Review', icon: PixelClipboardCheckIcon, badge: 6 },
+    {
+      id: 'Review',
+      label: 'Review',
+      icon: PixelClipboardCheckIcon,
+      badge: computeReviewBadge(pendingReviewsCount),
+    },
     { id: 'Policies', label: 'Policies & Agents', icon: PixelSlidersIcon },
     { id: 'Benchmarks', label: 'Benchmarks', icon: PixelBarChartIcon },
   ];
 
-  const environments = ['Development', 'Staging', 'Production'] as const;
+  const environments = ['Staging', 'Development', 'Production'] as const;
+  const { displayVersion, shortVersion } = formatVersion(version);
 
   return (
     <>
@@ -166,10 +187,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
               >
                 <div className="flex items-center gap-2">
                   <span className="relative flex h-2.5 w-2.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#22c55e]"></span>
+                    <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isReadOnly ? 'bg-amber-400' : 'bg-emerald-400'} opacity-75`}></span>
+                    <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${isReadOnly ? 'bg-amber-500' : 'bg-[#22c55e]'}`}></span>
                   </span>
-                  <span>{currentEnv}</span>
+                  <span>{selectedEnv} {isReadOnly ? '(RO)' : ''}</span>
                 </div>
                 <ChevronDown
                   size={15}
@@ -186,33 +207,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     <button
                       key={env}
                       onClick={() => {
-                        setCurrentEnv(env);
+                        setSelectedEnv(env);
                         setEnvOpen(false);
                       }}
                       className={`flex items-center justify-between w-full px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
-                        currentEnv === env
+                        selectedEnv === env
                           ? 'bg-[#6d3ee8] text-white'
                           : 'text-[#a9a3d4] hover:bg-[#232047] hover:text-white'
                       }`}
                     >
                       <span>{env}</span>
-                      {currentEnv === env && <Check size={13} />}
+                      {selectedEnv === env && <Check size={13} />}
                     </button>
                   ))}
                 </div>
               )}
 
               <div className="mt-3 px-1 text-[11px] font-mono font-medium text-[#645e8a]">
-                v0.3.0
+                {displayVersion}
               </div>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-3">
-              <span className="relative flex h-3 w-3" title={`Environment: ${currentEnv}`}>
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-[#22c55e]"></span>
+              <span className="relative flex h-3 w-3" title={`Environment: ${selectedEnv}`}>
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isReadOnly ? 'bg-amber-400' : 'bg-emerald-400'} opacity-75`}></span>
+                <span className={`relative inline-flex rounded-full h-3 w-3 ${isReadOnly ? 'bg-amber-500' : 'bg-[#22c55e]'}`}></span>
               </span>
-              <span className="text-[10px] font-mono font-medium text-[#645e8a]">v0.3</span>
+              <span className="text-[10px] font-mono font-medium text-[#645e8a]">{shortVersion}</span>
             </div>
           )}
         </div>

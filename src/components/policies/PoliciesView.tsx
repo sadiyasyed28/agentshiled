@@ -8,12 +8,22 @@ import { PolicyModal } from './PolicyModal';
 import { AgentsTableView } from './AgentsTableView';
 import { INITIAL_POLICIES } from './policyData';
 import type { SecurityPolicy, PolicyFilterState } from './policyTypes';
-import { apiClient } from '../../api/client';
+import { apiClient, type ApiSessionResponse, ApiError } from '../../api/client';
 
-export const PoliciesView: React.FC = () => {
+interface PoliciesViewProps {
+  session?: ApiSessionResponse | null;
+  onOpenLogin?: () => void;
+}
+
+export const PoliciesView: React.FC<PoliciesViewProps> = ({
+  session,
+  onOpenLogin,
+}) => {
   const [policies, setPolicies] = useState<SecurityPolicy[]>(INITIAL_POLICIES);
   const [isLive, setIsLive] = useState(false);
   const [pausedAgents, setPausedAgents] = useState<string[]>([]);
+  const [versionHash, setVersionHash] = useState<string | null>(null);
+  const [knownTools, setKnownTools] = useState<string[]>([]);
 
   // Starts closed so the policy portal only appears on demand
   const [selectedPolicy, setSelectedPolicy] = useState<SecurityPolicy | null>(null);
@@ -57,6 +67,8 @@ export const PoliciesView: React.FC = () => {
 
       if (policiesRes.status === 'fulfilled' && policiesRes.value?.policies) {
         const pRes = policiesRes.value;
+        if (pRes.version_hash) setVersionHash(pRes.version_hash);
+        if (pRes.known_tools) setKnownTools(pRes.known_tools);
         const mapped: SecurityPolicy[] = pRes.policies.map((p, idx) => ({
           id: `pol-${idx + 1}`,
           name: p.name,
@@ -165,6 +177,12 @@ export const PoliciesView: React.FC = () => {
   };
 
   const handleTogglePause = async (agentName: string, currentlyPaused: boolean) => {
+    if (!session?.authenticated) {
+      showToast('Administrative authentication required to pause or unpause agents.');
+      if (onOpenLogin) onOpenLogin();
+      return;
+    }
+
     try {
       if (currentlyPaused) {
         await apiClient.unpauseAgent(agentName);
@@ -175,9 +193,20 @@ export const PoliciesView: React.FC = () => {
         setPausedAgents((prev) => [...prev, agentName]);
         showToast(`Agent ${agentName} paused on server.`);
       }
+      await loadData();
     } catch (err: unknown) {
-      const msg = (err as Error)?.message || 'Failed to update agent status';
-      showToast(`Error: ${msg}`);
+      if (err instanceof ApiError) {
+        if (err.status === 403) {
+          showToast('Operation Blocked (403): Read-only mode prevents pausing/unpausing agents.');
+        } else if (err.status === 401) {
+          showToast('Authentication Required (401): Please sign in to pause/unpause agents.');
+        } else {
+          showToast(`Containment Error (${err.status}): ${err.message}`);
+        }
+      } else {
+        const msg = (err as Error)?.message || 'Failed to update agent status';
+        showToast(`Error: ${msg}`);
+      }
     }
   };
 
@@ -233,61 +262,12 @@ export const PoliciesView: React.FC = () => {
     };
   }, [policies]);
 
-  // Local sandbox policy editing/testing
-  const handleSavePolicy = (data: Partial<SecurityPolicy>) => {
+  // Informative policy inspection action
+  const handleOpenPolicyInspection = (pol: SecurityPolicy | null) => {
     cancelCloseTimer();
     setIsDetailClosing(false);
-
-    if (policyToEdit) {
-      setPolicies((prev) =>
-        prev.map((p) => {
-          if (p.id === policyToEdit.id) {
-            const updated: SecurityPolicy = {
-              ...p,
-              ...data,
-              lastUpdated: 'Sandbox Edited',
-              lastUpdatedTimestamp: Date.now(),
-            } as SecurityPolicy;
-            setSelectedPolicy(updated);
-            return updated;
-          }
-          return p;
-        })
-      );
-      showToast(`Sandbox Policy "${data.name}" updated locally.`);
-    } else {
-      const newPolicy: SecurityPolicy = {
-        id: data.id || `pol-${Date.now()}`,
-        name: data.name || 'Sandbox Policy',
-        version: data.version || 'v1.0.0',
-        status: data.status || 'Active',
-        description: data.description || 'Custom sandbox simulation ruleset',
-        assignedAgentNames: [],
-        lastUpdated: 'Sandbox Created',
-        lastUpdatedTimestamp: Date.now(),
-        rules: data.rules || {
-          allowedTools: ['read_web'],
-          argumentLimits: { maxItemsPerRequest: 10, maxFileSize: '25 MB' },
-          allowedHostnames: ['*.internal.com'],
-          defaultDeny: true,
-          reviewThreshold: 60,
-          auditAllActions: true,
-        },
-        versions: [
-          {
-            version: data.version || 'v1.0.0',
-            date: 'Today',
-            author: 'Admin',
-            description: 'Local sandbox policy trial',
-            isCurrent: true,
-          },
-        ],
-        agents: [],
-      };
-      setPolicies((prev) => [newPolicy, ...prev]);
-      setSelectedPolicy(newPolicy);
-      showToast(`Sandbox Policy "${newPolicy.name}" created locally.`);
-    }
+    setPolicyToEdit(pol);
+    setIsModalOpen(true);
   };
 
   return (
@@ -301,7 +281,7 @@ export const PoliciesView: React.FC = () => {
       )}
 
       {/* Status Indicator Banner */}
-      <div className="flex items-center justify-between pb-1.5">
+      <div className="flex items-center justify-between pb-1.5 flex-wrap gap-2">
         <span
           className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
             isLive
@@ -312,7 +292,42 @@ export const PoliciesView: React.FC = () => {
           <span className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-[#4ade80]' : 'bg-[#c084fc]'}`} />
           {isLive ? 'LIVE POLICIES (Enforced by Engine)' : 'DEMO POLICIES (Offline Dataset)'}
         </span>
+        {versionHash && (
+          <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[#1b1739] border border-[#3e3478] text-[#3ddc97]">
+            Policy Hash: {versionHash.slice(0, 10)}...
+          </span>
+        )}
       </div>
+
+      {/* IMMUTABLE POLICY NOTICE BANNER */}
+      <div className="mb-3 p-3 bg-[#1e1a3d] border border-[#3e3478] rounded-xl text-xs font-mono text-[#c4bbf0] flex items-center justify-between gap-3 shadow-sm">
+        <div className="flex items-center gap-2.5">
+          <span className="w-2 h-2 rounded-full bg-[#3ddc97]" />
+          <span>
+            <strong>Deterministic Policy Engine:</strong> Policies are code-defined immutable constraints verified by SHA-256 hash. Runtime edits are disallowed.
+          </span>
+        </div>
+      </div>
+
+      {/* AUTHENTICATION REQUIRED BANNER */}
+      {!session?.authenticated && (
+        <div className="mb-3 p-3 bg-[#241740] border border-[#6d3ee8]/60 rounded-xl flex items-center justify-between text-xs shadow-md">
+          <div className="flex items-center gap-2.5 text-[#d8b4fe]">
+            <span className="w-2 h-2 rounded-full bg-[#facc15] animate-pulse" />
+            <span>
+              <strong>Administrative Access Required:</strong> Sign in with your admin key to view live enforced policies and pause/unpause agents.
+            </span>
+          </div>
+          {onOpenLogin && (
+            <button
+              onClick={onOpenLogin}
+              className="px-3 py-1 bg-[#6d3ee8] hover:bg-[#7e50f5] text-white rounded-lg font-semibold text-xs transition-colors cursor-pointer flex-shrink-0 shadow-sm"
+            >
+              Sign In as Admin
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 1. PAGE HEADER */}
       <PolicyPageHeader
@@ -350,10 +365,7 @@ export const PoliciesView: React.FC = () => {
               filters={filters}
               onFilterChange={handleFilterChange}
               onResetFilters={handleResetFilters}
-              onOpenNewPolicy={() => {
-                setPolicyToEdit(null);
-                setIsModalOpen(true);
-              }}
+              onOpenNewPolicy={() => handleOpenPolicyInspection(null)}
             />
 
             {/* POLICIES TABLE */}
@@ -361,10 +373,7 @@ export const PoliciesView: React.FC = () => {
               policies={filteredPolicies}
               selectedPolicy={selectedPolicy}
               onSelectPolicy={handleSelectPolicy}
-              onEditPolicy={(pol) => {
-                setPolicyToEdit(pol);
-                setIsModalOpen(true);
-              }}
+              onEditPolicy={(pol) => handleOpenPolicyInspection(pol)}
             />
           </div>
 
@@ -379,10 +388,7 @@ export const PoliciesView: React.FC = () => {
               <PolicyDetailPanel
                 policy={selectedPolicy}
                 onClose={handleCloseDetails}
-                onEditPolicy={(pol) => {
-                  setPolicyToEdit(pol);
-                  setIsModalOpen(true);
-                }}
+                onEditPolicy={(pol) => handleOpenPolicyInspection(pol)}
               />
             </div>
           )}
@@ -421,8 +427,7 @@ export const PoliciesView: React.FC = () => {
               policy={selectedPolicy}
               onClose={handleCloseDetails}
               onEditPolicy={(pol) => {
-                setPolicyToEdit(pol);
-                setIsModalOpen(true);
+                handleOpenPolicyInspection(pol);
                 handleCloseDetails();
               }}
             />
@@ -430,12 +435,13 @@ export const PoliciesView: React.FC = () => {
         </div>
       )}
 
-      {/* POLICY CREATE/EDIT MODAL */}
+      {/* POLICY INSPECTION MODAL */}
       <PolicyModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         policyToEdit={policyToEdit}
-        onSavePolicy={handleSavePolicy}
+        policyVersionHash={versionHash}
+        knownTools={knownTools}
       />
     </main>
   );

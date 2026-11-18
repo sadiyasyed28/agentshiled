@@ -76,9 +76,10 @@ def audit_env(tmp_path):
 
 def test_deduplication_failure_across_simulated_restart_or_multi_worker(audit_env):
     """
-    AUDIT FINDING PROOF:
-    Demonstrates that in-memory `_seen_telemetry_ids` fails to deduplicate across
-    server restarts or across independent Uvicorn worker processes sharing the same DB.
+    REGRESSION TEST (Milestone 2.1 Remediation):
+    Verifies that database-backed deduplication successfully prevents duplicate
+    ingestion across server restarts and across independent Uvicorn worker
+    processes sharing the same database.
     """
     client = audit_env["client"]
     key = audit_env["tenant_keys"]["tenant-corp"]
@@ -118,20 +119,22 @@ def test_deduplication_failure_across_simulated_restart_or_multi_worker(audit_en
     # 4. Same client retries delivery to Worker 2 (or post-restart server)
     resp3 = worker2_client.post("/api/telemetry/events", json=event_payload, headers={"X-API-Key": key})
     assert resp3.status_code == 200
+    assert resp3.json()["ingested"] == 0
+    assert resp3.json()["duplicates"] == 1
 
-    # In-memory deduplication failed across workers: it ingested a duplicate!
+    # Database-backed deduplication prevented duplicate insertion across process boundaries
     records = audit_env["audit_store"].query(tenant_id="tenant-corp", tool="search_docs")
-    # This demonstrates the architectural limitation: 2 identical records inserted in DB
-    assert len(records) == 2, (
-        f"In-memory deduplication permitted duplicate database insertion across process boundary: {len(records)}"
+    assert len(records) == 1, (
+        f"Database-backed deduplication must ensure exactly 1 record exists across workers: {len(records)}"
     )
 
 
 def test_deduplication_cache_wipe_on_overflow(audit_env):
     """
-    AUDIT FINDING PROOF:
-    Demonstrates that when `len(tenant_seen) > 10000`, the cache wipes entirely (`clear()`),
-    allowing previously seen event IDs to be ingested again.
+    REGRESSION TEST (Milestone 2.1 Remediation):
+    Verifies that even if the in-memory cache overflows and clears (or evicts), persistent
+    database-backed deduplication prevents previously seen event IDs from being
+    re-ingested. Also verifies bounded cache eviction past 20,000 entries.
     """
     client = audit_env["client"]
     key = audit_env["tenant_keys"]["tenant-corp"]
@@ -142,64 +145,99 @@ def test_deduplication_cache_wipe_on_overflow(audit_env):
     }
     r = client.post("/api/telemetry/events", json=target_payload, headers={"X-API-Key": key})
     assert r.json()["ingested"] == 1
+    assert r.json()["duplicates"] == 0
 
-    # Immediate duplicate is caught
+    # Immediate duplicate is caught by in-memory cache
     r_dup = client.post("/api/telemetry/events", json=target_payload, headers={"X-API-Key": key})
+    assert r_dup.json()["ingested"] == 0
     assert r_dup.json()["duplicates"] == 1
 
-    # 2. Flood with 101 batches of 100 events (10,100 distinct events) to trigger eviction limit
-    flood_events = [
-        {"event_id": f"flood-{b}-{i}", "agent": "a", "tool": "t", "decision": "ALLOW"}
-        for b in range(101)
-        for i in range(100)
-    ]
-    # Send in chunks of 100
-    for chunk_start in range(0, len(flood_events), 100):
-        client.post(
-            "/api/telemetry/events",
-            json={"events": flood_events[chunk_start : chunk_start + 100]},
-            headers={"X-API-Key": key},
-        )
+    # 2. Simulate in-memory cache wipe (e.g. Memory pressure, process crash or cache eviction)
+    tenant_seen = client.app.state.seen_telemetry_ids.get("tenant-corp", set())
+    assert "target-event-1" in tenant_seen
+    tenant_seen.clear()
+    assert "target-event-1" not in tenant_seen
 
-    # 3. Now re-send target-event-1: because cache exceeded 10,000 and cleared, target-event-1 is accepted again!
+    # 3. Now re-send target-event-1: even though in-memory cache was wiped, database deduplication rejects it!
     r2 = client.post("/api/telemetry/events", json=target_payload, headers={"X-API-Key": key})
-    assert r2.json()["ingested"] == 1, "Expected cache wipe to allow duplicate re-ingestion"
-    assert r2.json()["duplicates"] == 0
+    assert r2.json()["ingested"] == 0, "Database deduplication must reject duplicate even after cache wipe"
+    assert r2.json()["duplicates"] == 1
+
+    # Verify only 1 record exists in the database
+    records = audit_env["audit_store"].query(tenant_id="tenant-corp")
+    target_records = [r for r in records if r.event_id == "target-event-1"]
+    assert len(target_records) == 1
+
+    # 4. Verify bounded cache eviction past 20,000 threshold
+    for i in range(20005):
+        tenant_seen.add(f"synthetic-evt-{i}")
+    trigger_payload = {"events": [{"event_id": "trigger-eviction-evt", "agent": "a", "tool": "t", "decision": "ALLOW"}]}
+    r_trig = client.post("/api/telemetry/events", json=trigger_payload, headers={"X-API-Key": key})
+    assert r_trig.status_code == 200
+    assert len(tenant_seen) <= 20000
 
 
 # ============================================================================
 # AUDIT VERIFICATION 2: Queue Overflow, Retry Exhaustion, and Event Loss
 # ============================================================================
 
-def test_telemetry_queue_overflow_event_loss():
+def test_telemetry_queue_overflow_event_loss(tmp_path):
     """
-    AUDIT FINDING PROOF:
-    When the telemetry queue exceeds `max_queue_size`, subsequent events are dropped
-    with only a logger warning, meaning the calling process receives no exception or
-    dead-letter spooling.
+    REGRESSION TEST (Milestone 2.1 Remediation):
+    Verifies telemetry queue overflow behavior:
+    1. With spooling enabled (default): in-memory queue overflow spills over to
+       persistent disk spool, preventing event loss and returning True.
+    2. With spooling disabled (or exhausted): subsequent overflow events are
+       safely dropped, returning False and updating dropped stats.
     """
-    cfg = TelemetryConfig(
+    spool_dir = str(tmp_path / "spool")
+
+    # 1. With spooling enabled: queue overflow spills over to disk
+    cfg_spooled = TelemetryConfig(
         api_url="http://127.0.0.1:9999",
         api_key="test-key",
         max_queue_size=3,
         flush_interval_seconds=60.0,
+        spool_enabled=True,
+        spool_dir=spool_dir,
+        max_spool_size=5,
     )
-    exporter = TelemetryExporter(cfg)
-    # Stop worker so queue stays full
+    exporter = TelemetryExporter(cfg_spooled)
     exporter._stop_event.set()
     if exporter._worker_thread:
         exporter._worker_thread.join(timeout=1.0)
 
-    # Queue 3 events
+    # Fill in-memory queue (capacity: 3)
     for i in range(3):
         assert exporter.record(TelemetryEvent(agent=f"agent-{i}")) is True
-
-    # 4th and 5th events are dropped silently (returns False)
-    assert exporter.record(TelemetryEvent(agent="overflow-1")) is False
-    assert exporter.record(TelemetryEvent(agent="overflow-2")) is False
-
-    # The caller application gets no persistent queue or fallback storage
     assert exporter._queue.qsize() == 3
+
+    # 4th and 5th events spill over to persistent disk spool without event loss
+    assert exporter.record(TelemetryEvent(event_id="spool-1", agent="overflow-1")) is True
+    assert exporter.record(TelemetryEvent(event_id="spool-2", agent="overflow-2")) is True
+    assert exporter.stats["spooled"] == 2
+    exporter.close()
+
+    # 2. With spooling disabled: queue overflow explicitly drops and returns False
+    cfg_unspooled = TelemetryConfig(
+        api_url="http://127.0.0.1:9999",
+        api_key="test-key",
+        max_queue_size=3,
+        flush_interval_seconds=60.0,
+        spool_enabled=False,
+    )
+    exporter_unspooled = TelemetryExporter(cfg_unspooled)
+    exporter_unspooled._stop_event.set()
+    if exporter_unspooled._worker_thread:
+        exporter_unspooled._worker_thread.join(timeout=1.0)
+
+    for i in range(3):
+        assert exporter_unspooled.record(TelemetryEvent(agent=f"agent-{i}")) is True
+
+    # 4th event is dropped because spool is disabled
+    assert exporter_unspooled.record(TelemetryEvent(agent="drop-1")) is False
+    assert exporter_unspooled.stats["dropped"] == 1
+    exporter_unspooled.close()
 
 
 def test_telemetry_retry_exhaustion_discards_events():
@@ -316,12 +354,10 @@ def test_telemetry_unauthenticated_rejected(audit_env):
 
 def test_correlation_id_fallback_erroneous_deduplication(audit_env):
     """
-    AUDIT FINDING PROOF:
-    Demonstrates that if an event has `event_id=None`, line 996 falls back to
-    `evt_id = item.event_id or item.correlation_id`.
-    Because a single tool call produces BOTH an authorization decision AND an execution
-    outcome sharing the SAME correlation_id, the execution outcome is erroneously
-    dropped as a duplicate!
+    REGRESSION TEST (Milestone 2.1 Remediation):
+    Verifies that when multiple events share the same correlation_id (e.g. an authorization
+    decision followed by an execution outcome), even if event_id is None, distinct unique
+    event IDs are generated and BOTH events are ingested without false deduplication.
     """
     client = audit_env["client"]
     key = audit_env["tenant_keys"]["tenant-corp"]
@@ -358,10 +394,20 @@ def test_correlation_id_fallback_erroneous_deduplication(audit_env):
     assert resp.status_code == 200
     data = resp.json()
 
-    # The bug in action: ingested 1, duplicates 1!
-    # The execution outcome was wrongly dropped because correlation_id alone was used as deduplication key!
-    assert data["ingested"] == 1
-    assert data["duplicates"] == 1
+    # Remediation in action: BOTH distinct events are accepted and ingested
+    assert data["ingested"] == 2
+    assert data["duplicates"] == 0
+
+    # Query audit store to verify both are persisted under the shared correlation_id
+    records = audit_env["audit_store"].query(tenant_id="tenant-corp", correlation_id=shared_correlation_id)
+    assert len(records) == 2
+    statuses = {r.execution_status for r in records}
+    assert "pending" in statuses
+    assert "executed" in statuses
+    # Verify each has a distinct event_id
+    event_ids = {r.event_id for r in records}
+    assert len(event_ids) == 2
+    assert None not in event_ids
 
 
 # ============================================================================

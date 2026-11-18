@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Calendar, RefreshCw, ChevronDown, Download, Check, FileSpreadsheet, FileCode } from 'lucide-react';
+import { Calendar, RefreshCw, ChevronDown, Download, Check, FileSpreadsheet, FileCode, ShieldCheck } from 'lucide-react';
 import { PixelHeaderBackdrop } from '../pixel/PixelHeaderBackdrop';
 
 interface EventsPageHeaderProps {
@@ -8,6 +8,8 @@ interface EventsPageHeaderProps {
   onExport: (format: 'csv' | 'json') => void;
   dateRange: string;
   onDateRangeChange: (range: string) => void;
+  onVerifyAudit?: () => void;
+  isVerifyingAudit?: boolean;
 }
 
 export const EventsPageHeader: React.FC<EventsPageHeaderProps> = ({
@@ -16,6 +18,8 @@ export const EventsPageHeader: React.FC<EventsPageHeaderProps> = ({
   onExport,
   dateRange,
   onDateRangeChange,
+  onVerifyAudit,
+  isVerifyingAudit = false,
 }) => {
   const [dateRangeOpen, setDateRangeOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
@@ -129,11 +133,24 @@ export const EventsPageHeader: React.FC<EventsPageHeaderProps> = ({
             )}
           </div>
 
-          {/* 3. Refresh Action Button */}
+          {/* 3. Verify Audit Integrity Button */}
+          {onVerifyAudit && (
+            <button
+              onClick={onVerifyAudit}
+              disabled={isVerifyingAudit}
+              title="Verify cryptographic SHA-256 hash chain of all audit events"
+              className="flex items-center gap-1.5 px-3 py-2 bg-[#1b1937] border border-[#3a3270] hover:border-[#6d3ee8] rounded-xl text-xs font-semibold text-[#c084fc] hover:text-white transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
+            >
+              <ShieldCheck size={14} className={isVerifyingAudit ? 'animate-pulse text-[#c084fc]' : 'text-[#a855f7]'} />
+              <span>{isVerifyingAudit ? 'Verifying...' : 'Verify Audit'}</span>
+            </button>
+          )}
+
+          {/* 4. Refresh Action Button */}
           <button
             onClick={onRefresh}
             title="Refresh events list"
-            className="flex items-center justify-center w-8 h-8 bg-[#1b1937] border border-[#3a3270] rounded-xl text-[#a29bcf] hover:text-white hover:border-[#584ea4] active:scale-95 transition-all shadow-sm group"
+            className="flex items-center justify-center w-8 h-8 bg-[#1b1937] border border-[#3a3270] rounded-xl text-[#a29bcf] hover:text-white hover:border-[#584ea4] active:scale-95 transition-all shadow-sm group cursor-pointer"
           >
             <RefreshCw
               size={14}
