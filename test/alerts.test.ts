@@ -107,3 +107,4 @@ describe('Real Security Alert Lifecycle & Dismissal Suite', () => {
     assert.strictEqual(toast.reason, rawAlert.description);
   });
 });
+
