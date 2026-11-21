@@ -386,9 +386,9 @@ export class ApiClient {
       }
     }
 
-    // Default 10s request timeout
+    // Default 30s request timeout to tolerate backend spin-up and cold starts
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
     const signal = options.signal || controller.signal;
 
     try {
@@ -421,7 +421,7 @@ export class ApiClient {
       clearTimeout(timeoutId);
       if (err instanceof ApiError) throw err;
       if (err instanceof Error && err.name === 'AbortError') {
-        throw new ApiError('Request timed out after 10000ms', 408);
+        throw new ApiError('Request timed out after 30000ms', 408);
       }
       throw new ApiError((err as Error)?.message || 'Network request failed', 0);
     }
