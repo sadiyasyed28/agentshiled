@@ -209,6 +209,18 @@ export const EventsView: React.FC<EventsViewProps> = ({
   // Filtered dataset
   const activeDataset = showDemoDataset ? ALL_EVENTS : eventsList;
 
+  const availableAgents = useMemo(() => {
+    return Array.from(new Set(activeDataset.map((e) => e.agent).filter(Boolean)));
+  }, [activeDataset]);
+
+  const availableTools = useMemo(() => {
+    return Array.from(new Set(activeDataset.map((e) => e.tool).filter(Boolean)));
+  }, [activeDataset]);
+
+  const availablePolicies = useMemo(() => {
+    return Array.from(new Set(activeDataset.map((e) => e.policy).filter(Boolean)));
+  }, [activeDataset]);
+
   const filteredEvents = useMemo(() => {
     return activeDataset.filter((evt) => {
       // 1. Search query
@@ -496,6 +508,9 @@ export const EventsView: React.FC<EventsViewProps> = ({
             onFilterChange={handleFilterChange}
             onClearAll={handleClearAll}
             activeFilterCount={activeFilterCount}
+            availableAgents={availableAgents}
+            availableTools={availableTools}
+            availablePolicies={availablePolicies}
           />
 
           {/* 4. EVENTS TABLE & PAGINATION */}
