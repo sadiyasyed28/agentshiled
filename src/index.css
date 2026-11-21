@@ -9,6 +9,7 @@
 
 @layer base {
   :root {
+    color-scheme: dark;
     --bg-canvas: #0e0d21;
     --bg-sidebar: #121124;
     --bg-card: #181635;
@@ -24,12 +25,17 @@
     box-sizing: border-box;
   }
   
+  html,
   body {
+    color-scheme: dark;
     margin: 0;
     padding: 0;
     background-color: var(--bg-canvas);
     color: #e2e1f0;
     font-family: 'Pixelify Sans', 'VT323', monospace;
+    letter-spacing: 0.02em;
+    line-height: 1.5;
+    text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     overflow-x: hidden;
@@ -47,6 +53,19 @@
   pre {
     font-family: inherit;
     font-variant-ligatures: none;
+    letter-spacing: inherit;
+  }
+
+  select {
+    color-scheme: dark;
+    background-color: #181635;
+    color: #e2e1f0;
+    border-color: #3f387c;
+  }
+
+  select option {
+    background-color: #181635;
+    color: #e2e1f0;
   }
 }
 

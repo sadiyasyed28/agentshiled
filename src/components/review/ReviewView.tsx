@@ -209,6 +209,14 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
   }, [currentStatus, effectivePending, effectiveApproved, effectiveDenied, effectiveExpired]);
 
   // Filtered & Sorted records
+  const availableAgents = useMemo(() => {
+    return Array.from(new Set(activeDataset.map((r) => r.agent).filter(Boolean)));
+  }, [activeDataset]);
+
+  const availableTools = useMemo(() => {
+    return Array.from(new Set(activeDataset.map((r) => r.tool).filter(Boolean)));
+  }, [activeDataset]);
+
   const filteredRequests = useMemo(() => {
     const list = activeDataset.filter((req) => {
       // 1. Search Query
@@ -521,6 +529,8 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
             filters={filters}
             onFilterChange={handleFilterChange}
             onResetFilters={handleResetFilters}
+            availableAgents={availableAgents}
+            availableTools={availableTools}
           />
 
           {/* 5. REQUESTS TABLE OR EMPTY STATE */}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { TopNavigation } from './components/TopNavigation';
 import { DashboardHeader } from './components/DashboardHeader';
@@ -109,6 +109,13 @@ export function App() {
 
   // Active Alert Notification
   const [activeAlert, setActiveAlert] = useState<AlertNotification | null>(null);
+  const dismissedAlertIdsRef = useRef<Set<string>>(new Set());
+
+  const handleClearNotifications = () => {
+    notifications.forEach((n) => dismissedAlertIdsRef.current.add(n.id));
+    setNotifications([]);
+    setActiveAlert(null);
+  };
 
   // Derive daily activity chart from real event timestamps
   const computeActivityFromEvents = (items: ApiEventItem[]): DayData[] | null => {
@@ -212,7 +219,8 @@ export function App() {
       const pendingReviews = statsRes.status === 'fulfilled' ? statsRes.value?.pending_reviews_count : 0;
       const pausedList = statsRes.status === 'fulfilled' ? statsRes.value?.paused_agents : [];
 
-      const derivedNotifications = deriveSecurityNotifications(rawAlerts, pendingReviews, pausedList);
+      const derivedNotifications = deriveSecurityNotifications(rawAlerts, pendingReviews, pausedList)
+        .filter((notif) => !dismissedAlertIdsRef.current.has(notif.id));
       derivedNotifications.forEach((notif) => {
         if (notif.id.startsWith('alert-')) {
           notif.onAction = () => handleSelectTab('Events');
@@ -223,6 +231,23 @@ export function App() {
         }
       });
       setNotifications(derivedNotifications);
+
+      // Honest Alert Toast trigger for unacknowledged alerts or high-risk blocks
+      const unackAlert = rawAlerts.find(
+        (a) =>
+          !dismissedAlertIdsRef.current.has(`alert-${a.alert_id}`) &&
+          (a.severity?.toLowerCase() === 'critical' || a.severity?.toLowerCase() === 'high')
+      );
+      if (unackAlert && !activeAlert) {
+        setActiveAlert({
+          id: `alert-${unackAlert.alert_id}`,
+          agent: unackAlert.agent_id || 'system',
+          severity: unackAlert.severity?.toLowerCase() === 'critical' ? 'critical' : 'warning',
+          riskScore: 85,
+          timestamp: unackAlert.timestamp ? new Date(unackAlert.timestamp).toLocaleTimeString() : 'Just now',
+          reason: unackAlert.description || unackAlert.title || 'Security alert raised',
+        });
+      }
 
       const rawEvents: ApiEventItem[] =
         eventsRes.status === 'fulfilled' && eventsRes.value?.events
@@ -255,6 +280,22 @@ export function App() {
         const medium = rawEvents.filter((e) => (e.risk_score || 0) >= 31 && (e.risk_score || 0) <= 60).length;
         const low = rawEvents.filter((e) => (e.risk_score || 0) <= 30).length;
         setRiskCounts({ critical, high, medium, low });
+
+        if (!unackAlert && !activeAlert && rawEvents.length > 0) {
+          const highRiskBlocked = rawEvents.find(
+            (e) => e.decision === 'BLOCK' && (e.risk_score || 0) >= 80 && !dismissedAlertIdsRef.current.has(`evt-${e.id}`)
+          );
+          if (highRiskBlocked) {
+            setActiveAlert({
+              id: `evt-${highRiskBlocked.id}`,
+              agent: highRiskBlocked.agent,
+              severity: 'critical',
+              riskScore: Math.round(highRiskBlocked.risk_score || 85),
+              timestamp: highRiskBlocked.timestamp ? new Date(highRiskBlocked.timestamp).toLocaleTimeString() : 'Recently',
+              reason: highRiskBlocked.reasons?.[0] || `Action blocked: high-risk invocation of ${highRiskBlocked.tool}`,
+            });
+          }
+        }
       }
 
       const paused =
@@ -351,7 +392,18 @@ export function App() {
     });
     checkSession();
     fetchDashboardData();
-    return () => unsub();
+
+    // Lightweight periodic refresh for active alerts and live status
+    const interval = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchDashboardData();
+      }
+    }, 15000);
+
+    return () => {
+      unsub();
+      window.clearInterval(interval);
+    };
   }, [checkSession, fetchDashboardData]);
 
   const handleLoginSuccess = async (newSession: ApiSessionResponse) => {
@@ -447,6 +499,7 @@ export function App() {
           healthStatus={healthStatus}
           onOpenHealth={() => setIsHealthModalOpen(true)}
           notifications={notifications}
+          onClearNotifications={handleClearNotifications}
         />
 
         {/* Tab Body View */}
@@ -563,19 +616,16 @@ export function App() {
       {/* 3. INTERACTIVE PIXEL ALERT TOAST */}
       <PixelAlertToast
         alert={activeAlert}
-        onDismiss={() => setActiveAlert(null)}
-        onViewEvent={(alert) => {
-          setSelectedEvent({
-            id: alert.id,
-            agent: alert.agent,
-            action: 'anomaly_investigation',
-            decision: alert.severity === 'critical' ? 'Blocked' : 'Review',
-            riskScore: alert.riskScore,
-            timestamp: alert.timestamp,
-            reason: alert.reason,
-            payloadSummary: `Payload inspection flagged for ${alert.agent}.\nAnomaly pattern detected in outbound packets.`,
-          });
+        onDismiss={() => {
+          if (activeAlert) {
+            dismissedAlertIdsRef.current.add(activeAlert.id);
+          }
           setActiveAlert(null);
+        }}
+        onViewEvent={(alert) => {
+          dismissedAlertIdsRef.current.add(alert.id);
+          setActiveAlert(null);
+          handleSelectTab('Events');
         }}
       />
 
