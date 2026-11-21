@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Search, ChevronDown, SlidersHorizontal, X, Check } from 'lucide-react';
 import type { EventsFilterState, EventDecision, ExecutionStatus } from './eventsTypes';
 
@@ -7,6 +7,9 @@ interface EventsFilterToolbarProps {
   onFilterChange: <K extends keyof EventsFilterState>(key: K, value: EventsFilterState[K]) => void;
   onClearAll: () => void;
   activeFilterCount: number;
+  availableAgents?: string[];
+  availableTools?: string[];
+  availablePolicies?: string[];
 }
 
 export const EventsFilterToolbar: React.FC<EventsFilterToolbarProps> = ({
@@ -14,44 +17,97 @@ export const EventsFilterToolbar: React.FC<EventsFilterToolbarProps> = ({
   onFilterChange,
   onClearAll,
   activeFilterCount,
+  availableAgents,
+  availableTools,
+  availablePolicies,
 }) => {
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (toolbarRef.current && !toolbarRef.current.contains(event.target as Node)) {
+        setOpenDropdown(null);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenDropdown(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   const toggleDropdown = (name: string) => {
     setOpenDropdown((prev) => (prev === name ? null : name));
   };
 
   const decisions: (EventDecision | 'All')[] = ['All', 'Allowed', 'Review', 'Blocked'];
-  const agents = ['All', 'research-agent', 'email-agent', 'ops-agent', 'data-agent'];
+  
+  const agents = [
+    'All',
+    ...Array.from(
+      new Set(
+        availableAgents && availableAgents.length > 0
+          ? availableAgents
+          : ['research-agent', 'email-agent', 'ops-agent', 'data-agent']
+      )
+    ),
+  ];
+
   const tools = [
     'All',
-    'read_web',
-    'send_email',
-    'list_files',
-    'query_db',
-    'download_file',
-    'read_mail',
-    'modify_record',
-    'delete_record',
+    ...Array.from(
+      new Set(
+        availableTools && availableTools.length > 0
+          ? availableTools
+          : [
+              'read_web',
+              'send_email',
+              'list_files',
+              'query_db',
+              'download_file',
+              'read_mail',
+              'modify_record',
+              'delete_record',
+            ]
+      )
+    ),
   ];
+
   const riskRanges: EventsFilterState['riskRange'][] = [
     'All',
     'Low (0-30)',
     'Medium (31-70)',
     'High (71-100)',
   ];
+
   const executions: (ExecutionStatus | 'All')[] = ['All', 'Executed', 'Not Executed', 'Pending'];
+
   const policies = [
     'All',
-    'Research v2',
-    'Restricted v1',
-    'Operations v1',
-    'Data Access v3',
-    'Email v1',
+    ...Array.from(
+      new Set(
+        availablePolicies && availablePolicies.length > 0
+          ? availablePolicies
+          : [
+              'Research v2',
+              'Restricted v1',
+              'Operations v1',
+              'Data Access v3',
+              'Email v1',
+            ]
+      )
+    ),
   ];
 
   return (
-    <div className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 mb-3.5">
+    <div ref={toolbarRef} className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 mb-3.5">
       {/* LEFT: SEARCH & FILTER BUTTONS */}
       <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
         {/* 1. SEARCH INPUT */}

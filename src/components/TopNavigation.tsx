@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Search, Bell, ChevronDown, Menu, Shield, CheckCircle, AlertTriangle, X, PanelLeftClose, PanelLeftOpen, LogIn, LogOut, Lock, Activity, XCircle } from 'lucide-react';
 import { PixelAvatar } from './pixel/PixelAvatar';
 import type { ApiSessionResponse } from '../api/client';
@@ -19,6 +19,7 @@ interface TopNavigationProps {
   onOpenHealth?: () => void;
   notifications?: SecurityNotificationItem[];
   onSelectNotification?: (item: SecurityNotificationItem) => void;
+  onClearNotifications?: () => void;
 }
 
 export const TopNavigation: React.FC<TopNavigationProps> = ({
@@ -35,9 +36,36 @@ export const TopNavigation: React.FC<TopNavigationProps> = ({
   onOpenHealth,
   notifications = [],
   onSelectNotification,
+  onClearNotifications,
 }) => {
   const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const notifRef = useRef<HTMLDivElement>(null);
+  const adminRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (notifRef.current && !notifRef.current.contains(target)) {
+        setNotificationsOpen(false);
+      }
+      if (adminRef.current && !adminRef.current.contains(target)) {
+        setAdminMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setNotificationsOpen(false);
+        setAdminMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   const isAuthenticated = Boolean(session?.authenticated);
   const userRole = session?.role === 'global_admin'
@@ -108,7 +136,7 @@ export const TopNavigation: React.FC<TopNavigationProps> = ({
         </button>
 
         {/* Notification Bell */}
-        <div className="relative">
+        <div ref={notifRef} className="relative">
           <button
             onClick={() => {
               setNotificationsOpen(!notificationsOpen);
@@ -139,12 +167,22 @@ export const TopNavigation: React.FC<TopNavigationProps> = ({
                     </span>
                   )}
                 </div>
-                <button
-                  onClick={() => setNotificationsOpen(false)}
-                  className="text-[#8881b8] hover:text-white cursor-pointer"
-                >
-                  <X size={14} />
-                </button>
+                <div className="flex items-center gap-2">
+                  {notifications.length > 0 && onClearNotifications && (
+                    <button
+                      onClick={onClearNotifications}
+                      className="text-[10.5px] text-[#a59ecd] hover:text-white transition-colors cursor-pointer"
+                    >
+                      Dismiss All
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setNotificationsOpen(false)}
+                    className="text-[#8881b8] hover:text-white cursor-pointer"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
               </div>
 
               <div className="flex flex-col gap-2 mt-2 max-h-64 overflow-y-auto">
@@ -234,7 +272,7 @@ export const TopNavigation: React.FC<TopNavigationProps> = ({
         )}
 
         {/* Administrator Profile / Auth Dropdown */}
-        <div className="relative">
+        <div ref={adminRef} className="relative">
           <button
             onClick={() => {
               setAdminMenuOpen(!adminMenuOpen);

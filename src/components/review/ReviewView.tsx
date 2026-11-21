@@ -209,6 +209,14 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
   }, [currentStatus, effectivePending, effectiveApproved, effectiveDenied, effectiveExpired]);
 
   // Filtered & Sorted records
+  const availableAgents = useMemo(() => {
+    return Array.from(new Set(activeDataset.map((r) => r.agent).filter(Boolean)));
+  }, [activeDataset]);
+
+  const availableTools = useMemo(() => {
+    return Array.from(new Set(activeDataset.map((r) => r.tool).filter(Boolean)));
+  }, [activeDataset]);
+
   const filteredRequests = useMemo(() => {
     const list = activeDataset.filter((req) => {
       // 1. Search Query
@@ -403,36 +411,33 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 items-start">
         {/* LEFT WORKSPACE */}
         <div
-          className={`flex flex-col min-w-0 transition-all duration-300 ${
-            selectedRequest ? 'lg:col-span-8' : 'lg:col-span-12'
-          }`}
+          className={`flex flex-col min-w-0 transition-all duration-300 ${selectedRequest ? 'lg:col-span-8' : 'lg:col-span-12'
+            }`}
         >
           {/* Status Indicator Banner & Dataset Mode Toggle */}
           <div className="flex items-center justify-between pb-1.5 flex-wrap gap-2">
             <div className="flex items-center gap-2">
               <span
-                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${
-                  showReferenceFixtures
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-semibold border ${showReferenceFixtures
                     ? 'bg-[#2b2559] text-[#c084fc] border-[#3e3478]'
                     : isLive
-                    ? 'bg-[#153e28] text-[#4ade80] border-[#1b6d39]'
-                    : 'bg-[#1f1b3d] text-[#9c96c9] border-[#342e61]'
-                }`}
+                      ? 'bg-[#153e28] text-[#4ade80] border-[#1b6d39]'
+                      : 'bg-[#1f1b3d] text-[#9c96c9] border-[#342e61]'
+                  }`}
               >
                 <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    showReferenceFixtures
+                  className={`w-1.5 h-1.5 rounded-full ${showReferenceFixtures
                       ? 'bg-[#c084fc]'
                       : isLive
-                      ? 'bg-[#4ade80]'
-                      : 'bg-[#736c9e]'
-                  }`}
+                        ? 'bg-[#4ade80]'
+                        : 'bg-[#736c9e]'
+                    }`}
                 />
                 {showReferenceFixtures
                   ? 'REFERENCE REVIEW DATASET (Demo Suite)'
                   : isLive
-                  ? `LIVE QUEUE (Server Connected · ${pendingList.length} Pending)`
-                  : 'LIVE QUEUE (Queue Empty / Standby)'}
+                    ? `LIVE QUEUE (Server Connected · ${pendingList.length} Pending)`
+                    : 'LIVE QUEUE (Queue Empty / Standby)'}
               </span>
             </div>
 
@@ -521,6 +526,8 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
             filters={filters}
             onFilterChange={handleFilterChange}
             onResetFilters={handleResetFilters}
+            availableAgents={availableAgents}
+            availableTools={availableTools}
           />
 
           {/* 5. REQUESTS TABLE OR EMPTY STATE */}
@@ -555,9 +562,8 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
         {selectedRequest && (
           <div
             key={selectedRequest.id}
-            className={`hidden lg:block lg:col-span-4 sticky top-[76px] pt-2 ${
-              isDetailsClosing ? 'portal-shell-exit' : 'portal-shell-enter'
-            }`}
+            className={`hidden lg:block lg:col-span-4 sticky top-[76px] pt-2 ${isDetailsClosing ? 'portal-shell-exit' : 'portal-shell-enter'
+              }`}
           >
             <ReviewDetailsPanel
               request={selectedRequest}
@@ -572,15 +578,13 @@ export const ReviewView: React.FC<ReviewViewProps> = ({
       {/* MOBILE / TABLET ANIMATED REVIEW PORTAL DRAWER */}
       {isMobileDetailsOpen && (
         <div
-          className={`fixed inset-0 z-50 lg:hidden flex justify-end bg-black/60 backdrop-blur-xs ${
-            isDetailsClosing ? 'portal-backdrop-exit' : 'portal-backdrop-enter'
-          }`}
+          className={`fixed inset-0 z-50 lg:hidden flex justify-end bg-black/60 backdrop-blur-xs ${isDetailsClosing ? 'portal-backdrop-exit' : 'portal-backdrop-enter'
+            }`}
         >
           <div className="fixed inset-0" onClick={handleCloseDetails} />
           <div
-            className={`relative w-full max-w-md h-full z-10 ${
-              isDetailsClosing ? 'portal-drawer-exit' : 'portal-drawer-enter'
-            }`}
+            className={`relative w-full max-w-md h-full z-10 ${isDetailsClosing ? 'portal-drawer-exit' : 'portal-drawer-enter'
+              }`}
           >
             <ReviewDetailsPanel
               request={selectedRequest}

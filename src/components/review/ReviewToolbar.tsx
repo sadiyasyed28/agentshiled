@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Search, ChevronDown, ArrowUpDown, X, Check } from 'lucide-react';
 import type { ReviewFilterState } from './reviewTypes';
 
@@ -6,28 +6,70 @@ interface ReviewToolbarProps {
   filters: ReviewFilterState;
   onFilterChange: <K extends keyof ReviewFilterState>(key: K, value: ReviewFilterState[K]) => void;
   onResetFilters: () => void;
+  availableAgents?: string[];
+  availableTools?: string[];
 }
 
 export const ReviewToolbar: React.FC<ReviewToolbarProps> = ({
   filters,
   onFilterChange,
   onResetFilters,
+  availableAgents,
+  availableTools,
 }) => {
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (toolbarRef.current && !toolbarRef.current.contains(event.target as Node)) {
+        setOpenDropdown(null);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenDropdown(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   const toggleDropdown = (name: string) => {
     setOpenDropdown((prev) => (prev === name ? null : name));
   };
 
-  const agents = ['All', 'research-agent', 'data-agent', 'email-agent', 'ops-agent'];
+  const agents = [
+    'All',
+    ...Array.from(
+      new Set(
+        availableAgents && availableAgents.length > 0
+          ? availableAgents
+          : ['research-agent', 'data-agent', 'email-agent', 'ops-agent']
+      )
+    ),
+  ];
+
   const tools = [
     'All',
-    'read_web',
-    'export_db',
-    'send_email',
-    'api_call',
-    'update_record',
-    'download_file',
+    ...Array.from(
+      new Set(
+        availableTools && availableTools.length > 0
+          ? availableTools
+          : [
+              'read_web',
+              'export_db',
+              'send_email',
+              'api_call',
+              'update_record',
+              'download_file',
+            ]
+      )
+    ),
   ];
   const riskScores = ['All', 'High (75+)', 'Medium (40-74)', 'Low (0-39)'];
   const sortOptions: ReviewFilterState['sortBy'][] = [
@@ -44,7 +86,7 @@ export const ReviewToolbar: React.FC<ReviewToolbarProps> = ({
     filters.riskRange !== 'All';
 
   return (
-    <div className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 mb-3.5">
+    <div ref={toolbarRef} className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 mb-3.5">
       <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
         {/* 1. SEARCH INPUT */}
         <div className="relative flex-1 min-w-[200px] max-w-[320px]">

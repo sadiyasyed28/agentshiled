@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Search, ChevronDown, Plus, X, Check } from 'lucide-react';
 import type { PolicyFilterState, PolicyStatus } from './policyTypes';
 
@@ -7,6 +7,7 @@ interface PolicyToolbarProps {
   onFilterChange: <K extends keyof PolicyFilterState>(key: K, value: PolicyFilterState[K]) => void;
   onResetFilters: () => void;
   onOpenNewPolicy: () => void;
+  availableAgents?: string[];
 }
 
 export const PolicyToolbar: React.FC<PolicyToolbarProps> = ({
@@ -14,15 +15,45 @@ export const PolicyToolbar: React.FC<PolicyToolbarProps> = ({
   onFilterChange,
   onResetFilters,
   onOpenNewPolicy,
+  availableAgents,
 }) => {
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (toolbarRef.current && !toolbarRef.current.contains(event.target as Node)) {
+        setOpenDropdown(null);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenDropdown(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   const toggleDropdown = (name: string) => {
     setOpenDropdown((prev) => (prev === name ? null : name));
   };
 
   const statuses: (PolicyStatus | 'All')[] = ['All', 'Active', 'Draft', 'Archived'];
-  const agents = ['All', 'research-agent', 'ops-agent', 'data-agent', 'email-agent'];
+  const agents = [
+    'All',
+    ...Array.from(
+      new Set(
+        availableAgents && availableAgents.length > 0
+          ? availableAgents
+          : ['research-agent', 'ops-agent', 'data-agent', 'email-agent']
+      )
+    ),
+  ];
 
   const hasActiveFilters =
     filters.searchQuery.trim() !== '' ||
@@ -30,7 +61,7 @@ export const PolicyToolbar: React.FC<PolicyToolbarProps> = ({
     filters.assignedAgent !== 'All';
 
   return (
-    <div className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 mb-3.5">
+    <div ref={toolbarRef} className="relative z-20 flex flex-wrap items-center justify-between gap-2.5 mb-3.5">
       {/* LEFT: SEARCH & DROPDOWNS */}
       <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
         {/* Search */}

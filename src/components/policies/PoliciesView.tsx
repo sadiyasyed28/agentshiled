@@ -211,6 +211,16 @@ export const PoliciesView: React.FC<PoliciesViewProps> = ({
   };
 
   // Filtered policies
+  const availableAgents = useMemo(() => {
+    const list: string[] = [];
+    policies.forEach((p) => {
+      p.assignedAgentNames.forEach((ag) => {
+        if (ag && !list.includes(ag)) list.push(ag);
+      });
+    });
+    return list;
+  }, [policies]);
+
   const filteredPolicies = useMemo(() => {
     return policies.filter((pol) => {
       // 1. Search Query
@@ -366,6 +376,7 @@ export const PoliciesView: React.FC<PoliciesViewProps> = ({
               onFilterChange={handleFilterChange}
               onResetFilters={handleResetFilters}
               onOpenNewPolicy={() => handleOpenPolicyInspection(null)}
+              availableAgents={availableAgents}
             />
 
             {/* POLICIES TABLE */}

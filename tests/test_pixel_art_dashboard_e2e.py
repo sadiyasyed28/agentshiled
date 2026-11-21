@@ -171,7 +171,8 @@ async def test_pixel_art_dashboard_full_lifecycle(live_servers):
         page.on("pageerror", lambda err: console_errors.append(str(err)))
 
         # 1. Load Dashboard
-        await page.goto(live_servers, wait_until="networkidle")
+        await page.goto(live_servers, wait_until="domcontentloaded")
+        await page.wait_for_selector("header", timeout=10000)
         critical_errors = [e for e in console_errors if "favicon" not in e.lower()]
         assert len(critical_errors) == 0, f"Uncaught critical console errors on load: {critical_errors}"
 
@@ -203,7 +204,8 @@ async def test_pixel_art_dashboard_full_lifecycle(live_servers):
         await expect(admin_chip).to_be_visible()
 
         # 5. Verify Session Survives Page Refresh (Requirement 5)
-        await page.reload(wait_until="networkidle")
+        await page.reload(wait_until="domcontentloaded")
+        await page.wait_for_selector("header", timeout=10000)
         admin_chip_reloaded = page.locator("header button:has-text('Admin')").first
         await expect(admin_chip_reloaded).to_be_visible()
 

@@ -21,6 +21,8 @@ AgentShield operates in two primary modes:
                                   [Blocked / Allowed]
 ```
 
+> 📄 **Official User & Deployment Guide**: For the comprehensive, publication-ready guide complete with architecture diagrams, full UI walkthrough, operational runbooks, and preflight deployment checklists, see [AgentShield User and Deployment Guide (PDF)](docs/AgentShield-User-and-Deployment-Guide.pdf).
+
 ---
 
 ## Features & Screens
@@ -28,11 +30,30 @@ AgentShield operates in two primary modes:
 AgentShield includes a retro 16-bit pixel-art security dashboard providing full runtime visibility and control:
 
 - **Overview Dashboard**: Agent runtime metrics, active risk score indicators, real-time security activity stream, attention queue, and quick actions.
-- **Events Screen**: Complete audit trail of every intercepted agent action with real-time search, multi-attribute filters, and slide-over event payload inspection drawer.
-- **Human-in-the-Loop Review**: Dedicated review queue for high-risk actions requiring administrative approval, complete with argument inspection, policy checks, denial reasons, and batch approval.
-- **Policies & Agents**: Centralized security policy management (allowed tools, rate limits, domain restrictions, behavior rules) alongside a full agent runtime registry.
-- **Security Benchmarks**: Evaluates protection effectiveness against OWASP Agentic vectors (prompt injection, tool misuse, privilege escalation, SSRF, volume limits), comparing baseline execution against AgentShield protected mode.
-- **Settings & Telemetry**: Safe inspection of non-secret runtime limits, environment configuration, and active policy hashes with zero secret leakage.
+- **System Health Diagnostics**: Live operational telemetry querying `/api/health`, `/api/health/readiness`, and `/api/telemetry/status` with honest state reporting.
+- **Events Screen**: Complete audit trail of every intercepted agent action with one-click cryptographic SHA-256 hash-chain verification and payload inspection drawer.
+- **Real-Time Security Alerts**: Connected to `/api/incident/alerts` with severity tracking, toast notifications, and dismissal controls.
+- **Human-in-the-Loop Review**: Dedicated review queue for held tool execution proposals requiring administrative approval with argument inspection and denial reasons.
+- **Policies & Agents**: Centralized security policy management alongside a full agent registry and one-click containment controls.
+- **Security Benchmarks**: Evaluates protection effectiveness against OWASP Agentic vectors (prompt injection, tool misuse, privilege escalation, SSRF, volume limits) across 32 standardized scenarios.
+
+### Dashboard Showcase
+
+| Overview Dashboard | System Health Diagnostics |
+| :---: | :---: |
+| ![Overview](docs/screenshots/01-overview.png) | ![System Health](docs/screenshots/02-system-health-modal.png) |
+
+| Real-Time Security Alerts | Events & Audit Integrity |
+| :---: | :---: |
+| ![Security Alerts](docs/screenshots/03-security-alerts.png) | ![Events & Audit](docs/screenshots/06-events-view.png) |
+
+| Human-in-the-Loop Review Queue | Policies & Agent Containment |
+| :---: | :---: |
+| ![Review Queue](docs/screenshots/08-review-queue.png) | ![Policies & Containment](docs/screenshots/09-policies-view.png) |
+
+| Security Benchmarks Suite | Mobile Responsive View (390px) |
+| :---: | :---: |
+| ![Security Benchmarks](docs/screenshots/10-benchmarks-view.png) | ![Mobile View](docs/screenshots/11-mobile-view.png) |
 
 ---
 
