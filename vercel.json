@@ -6,15 +6,15 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/index.py"
+      "destination": "https://agentshield-backend-staging.onrender.com/api/$1"
     },
     {
       "source": "/(health|events|check|authorize|execute|metrics)",
-      "destination": "/api/index.py"
+      "destination": "https://agentshield-backend-staging.onrender.com/$1"
     },
     {
       "source": "/(audit|incident|health)/(.*)",
-      "destination": "/api/index.py"
+      "destination": "https://agentshield-backend-staging.onrender.com/$1/$2"
     },
     {
       "source": "/((?!api/|health|events|check|authorize|execute|metrics|audit/|incident/).*)",
