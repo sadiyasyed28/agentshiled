@@ -618,6 +618,23 @@ shield = Shield(policy=policy, telemetry_config=telemetry)
 - **Tenant Isolation**: Telemetry requests are authenticated using cryptographic API keys and strictly isolated to the authenticated workspace.
 - **Redaction**: All secret credentials, tokens, and sensitive arguments are redacted *before* transmission over the wire.
 
+### 7. Real Enterprise Customer Pilot Example
+
+A complete, self-contained, real enterprise agent tool execution script is provided in [`examples/real_agent_minimal_example.py`](examples/real_agent_minimal_example.py).
+
+It demonstrates an end-to-end e-commerce order fulfillment agent with stateful Python tools:
+1. **Permitted Tools**: `check_inventory` and `place_order` execute real logic, update inventory quantities, and log `ALLOW` decisions with status `executed`.
+2. **Prohibited Tools**: `delete_records` fails closed immediately without invoking the function, raising `ToolBlockedError`.
+3. **Threshold Violations**: Exceeding declared limits (e.g., `quantity > 250`) is blocked before execution.
+4. **Human Review Escalation**: High-value monetary refunds (e.g., `$2,400`) halt execution, enqueue into the `ReviewStore`, and raise `ToolReviewRequiredError`.
+5. **Supervisor Approval**: An authorized reviewer claims the review lease and triggers at-most-once execution of the held callable.
+6. **Audit Ledger Verification**: SHA-256 continuous hash chain verification via `audit_store.verify_integrity()`.
+
+To run the pilot example:
+```bash
+python examples/real_agent_minimal_example.py
+```
+
 ---
 
 ## Vercel Deployment Guide
