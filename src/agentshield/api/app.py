@@ -199,7 +199,6 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=configured_origins_list,
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|.*\.vercel\.app|.*\.onrender\.com)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
