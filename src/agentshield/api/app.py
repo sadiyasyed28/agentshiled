@@ -163,6 +163,20 @@ def create_app(
     # CORS & Trusted Origins configuration
     # Canonical variable: AGENTSHIELD_CORS_ORIGINS (governs both CORS headers and CSRF origin verification)
     # Backward-compatible alias: AGENTSHIELD_TRUSTED_ORIGINS
+    default_origins = {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "https://agentshield.vercel.app",
+        "https://agentshield-staging.vercel.app",
+        "https://agentshiled.vercel.app",
+        "https://agentshield-backend-staging.onrender.com",
+    }
+    configured_origins = set(default_origins)
+
     configured_origin_sources = []
     cors_env = os.environ.get("AGENTSHIELD_CORS_ORIGINS")
     trusted_env = os.environ.get("AGENTSHIELD_TRUSTED_ORIGINS")
@@ -170,20 +184,22 @@ def create_app(
         configured_origin_sources.append(cors_env)
     if trusted_env:
         configured_origin_sources.append(trusted_env)
-    if not configured_origin_sources:
-        configured_origin_sources.append("http://localhost:5173,http://127.0.0.1:5173")
 
-    configured_origins = set()
     for src in configured_origin_sources:
         for orig in src.split(","):
             cleaned = orig.strip().rstrip("/")
             if cleaned:
-                configured_origins.add(cleaned)
+                if not cleaned.startswith("http://") and not cleaned.startswith("https://"):
+                    configured_origins.add(f"https://{cleaned}")
+                    configured_origins.add(f"http://{cleaned}")
+                else:
+                    configured_origins.add(cleaned)
     configured_origins_list = sorted(configured_origins)
 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=configured_origins_list,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|.*\.vercel\.app|.*\.onrender\.com)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

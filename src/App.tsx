@@ -36,6 +36,7 @@ import type {
 } from './types';
 import {
   apiClient,
+  ENV_API_URLS,
   type ApiOverviewStats,
   type ApiEventItem,
   type ApiSessionResponse,
@@ -425,6 +426,13 @@ export function App() {
     }
   };
 
+  const handleSelectEnvironment = useCallback((newEnv: string) => {
+    setAppEnvironment(newEnv);
+    const targetUrl = ENV_API_URLS[newEnv] ?? '';
+    apiClient.setBaseUrl(targetUrl);
+    fetchDashboardData();
+  }, [fetchDashboardData]);
+
   // Global CMD + K shortcut
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -477,6 +485,7 @@ export function App() {
         environment={appEnvironment}
         version={appVersion}
         isReadOnly={overviewStats?.is_read_only ?? false}
+        onSelectEnvironment={handleSelectEnvironment}
       />
 
       {/* 2. MAIN VIEW CONTAINER */}

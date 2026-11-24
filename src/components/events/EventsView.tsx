@@ -152,7 +152,7 @@ export const EventsView: React.FC<EventsViewProps> = ({
 
   useEffect(() => {
     loadEvents();
-  }, []);
+  }, [isRefreshingGlobal]);
 
   // Open (or swap) the event drawer with an enter animation
   const handleSelectEvent = (evt: SecurityEventRecord) => {

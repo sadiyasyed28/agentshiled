@@ -23,6 +23,7 @@ interface SidebarProps {
   environment?: string;
   version?: string;
   isReadOnly?: boolean;
+  onSelectEnvironment?: (env: string) => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -36,6 +37,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   environment = 'Staging',
   version = '0.2.0',
   isReadOnly = false,
+  onSelectEnvironment,
 }) => {
   const [envOpen, setEnvOpen] = useState(false);
   const [selectedEnv, setSelectedEnv] = useState<string>(environment);
@@ -209,6 +211,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       onClick={() => {
                         setSelectedEnv(env);
                         setEnvOpen(false);
+                        onSelectEnvironment?.(env);
                       }}
                       className={`flex items-center justify-between w-full px-3 py-1.5 rounded-lg text-xs font-medium text-left transition-colors ${
                         selectedEnv === env

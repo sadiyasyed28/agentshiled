@@ -318,9 +318,36 @@ export interface ApiLoginCredentials {
   tenant_id?: string;
 }
 
+export const DEFAULT_STAGING_API_URL = 'https://agentshield-backend-staging.onrender.com';
+
+export const ENV_API_URLS: Record<string, string> = {
+  Staging: DEFAULT_STAGING_API_URL,
+  'Staging (Read-Only)': DEFAULT_STAGING_API_URL,
+  Development: 'http://localhost:8000',
+  Production: '',
+};
+
+// Check if running in a staging or preview context
+function resolveInitialBaseUrl(): string {
+  if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname.toLowerCase();
+    // In local development or production domain, use same-origin / proxy
+    if (host === 'localhost' || host === '127.0.0.1' || host === 'agentshiled.vercel.app' || host === 'agentshield.vercel.app') {
+      return '';
+    }
+    // If hosted on a staging preview domain or Render, point directly to staging backend
+    if (host.includes('staging') || host.includes('render.com')) {
+      return DEFAULT_STAGING_API_URL;
+    }
+  }
+  return '';
+}
+
 // Relative URL by default so both Vercel same-origin and Vite dev proxy route cleanly
-const API_BASE_URL =
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || '';
+const API_BASE_URL = resolveInitialBaseUrl();
 
 export class ApiError extends Error {
   status: number;
@@ -345,6 +372,14 @@ export class ApiClient {
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  setBaseUrl(newBaseUrl: string): void {
+    this.baseUrl = newBaseUrl.replace(/\/$/, '');
   }
 
   onAuthChange(listener: (session: ApiSessionResponse | null) => void): () => void {
