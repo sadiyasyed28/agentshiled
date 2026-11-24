@@ -218,7 +218,7 @@ def test_production_branch_vercel_json_isolation():
             continue
         assert (
             dest.startswith("https://agentshield-backend-staging.onrender.com")
-            or dest in ("/api", "/api/index", "/api/index.py", "/api/test.py")
+            or dest in ("/api", "/api/index", "/api/index.py")
         ), f"Unauthorized rewrite destination found: {dest}"
 
 

@@ -923,6 +923,8 @@ def create_app(
 
     @app.get("/health", response_model=HealthResponse)
     @app.get("/api/health", response_model=HealthResponse)
+    @app.get("/api", response_model=HealthResponse)
+    @app.get("/api/", response_model=HealthResponse)
     def health():
         return HealthResponse(
             status="healthy",
