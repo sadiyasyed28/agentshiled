@@ -17,7 +17,7 @@
       "destination": "/api"
     },
     {
-      "source": "/((?!api/|health|events|check|authorize|execute|metrics|audit/|incident/).*)",
+      "source": "/((?!api/|api$|health|events|check|authorize|execute|metrics|audit/|incident/).*)",
       "destination": "/index.html"
     }
   ]
