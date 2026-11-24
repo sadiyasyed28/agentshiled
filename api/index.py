@@ -37,6 +37,12 @@ def _is_staging_environment() -> bool:
     if env == "production":
         return False
 
+    vercel_env = (os.environ.get("VERCEL_ENV") or "").lower()
+    if vercel_env == "production":
+        return False
+    if vercel_env in ("preview", "development"):
+        return True
+
     if os.environ.get("AGENTSHIELD_PROXY_STAGING") in ("1", "true", "yes"):
         return True
 
@@ -57,10 +63,12 @@ def _is_staging_environment() -> bool:
             cwd=str(root_path),
         )
         branch = res.stdout.strip()
+        if branch in ("main", "master"):
+            return False
         return "feature" in branch or "staging" in branch
     except Exception:
-        # Default to staging on non-main deployments
-        return True
+        # Default to production core app on unknown serverless runtimes
+        return False
 
 
 def create_staging_proxy_app() -> FastAPI:
@@ -143,6 +151,32 @@ def create_staging_proxy_app() -> FastAPI:
         )
 
     return proxy
+
+
+@core_app.middleware("http")
+async def vercel_path_rewrite_middleware(request: Request, call_next):
+    """
+    Restores original requested path on Vercel Serverless deployments.
+    When Vercel rewrites /api/(.*) or /health to the serverless function endpoint (/api),
+    Vercel passes the original requested path in the 'x-matched-path' header.
+    This middleware updates request.scope['path'] so FastAPI's router matches the exact route.
+    """
+    matched = request.headers.get("x-matched-path")
+    if matched and request.scope.get("path") in ("/api", "/api/", "/api/index", "/api/index.py"):
+        request.scope["path"] = matched.split("?")[0]
+    return await call_next(request)
+
+
+@core_app.get("/api")
+@core_app.get("/api/")
+def core_api_root():
+    return {
+        "status": "healthy",
+        "service": "AgentShield API",
+        "version": "0.2.0",
+        "engine": "AgentShield Runtime",
+        "read_only": False,
+    }
 
 
 if _is_staging_environment():

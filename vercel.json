@@ -6,15 +6,15 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/index.py"
+      "destination": "/api"
     },
     {
       "source": "/(health|events|check|authorize|execute|metrics)",
-      "destination": "/api/index.py"
+      "destination": "/api"
     },
     {
       "source": "/(audit|incident|health)/(.*)",
-      "destination": "/api/index.py"
+      "destination": "/api"
     },
     {
       "source": "/((?!api/|health|events|check|authorize|execute|metrics|audit/|incident/).*)",

@@ -85,8 +85,8 @@ def test_vercel_json_syntax_and_route_coverage():
     is_staging = "feature" in branch or "staging" in branch
 
     if is_main:
-        assert "/api/index.py" in destinations, (
-            "Production branch (main) vercel.json must route to /api/index.py serverless adapter"
+        assert any(d in ("/api", "/api/index", "/api/index.py") for d in destinations), (
+            "Production branch (main) vercel.json must route to serverless adapter (/api or /api/index.py)"
         )
         assert not any("agentshield-backend-staging.onrender.com" in d for d in destinations), (
             "Production configuration must never point to the staging hostname"
@@ -97,12 +97,12 @@ def test_vercel_json_syntax_and_route_coverage():
         )
         for r in rewrites:
             if not r["source"].startswith("/((?!"):
-                assert r["destination"] != "/api/index.py", (
-                    "Staging configuration must never accidentally route API requests to /api/index.py"
+                assert r["destination"] not in ("/api", "/api/index", "/api/index.py"), (
+                    "Staging configuration must never accidentally route API requests to serverless adapter"
                 )
     else:
         has_approved_backend = any(
-            "agentshield-backend-staging.onrender.com" in d or d == "/api/index.py"
+            "agentshield-backend-staging.onrender.com" in d or d in ("/api", "/api/index", "/api/index.py")
             for d in destinations
         )
         assert has_approved_backend, "vercel.json must route to an approved backend"
@@ -170,7 +170,9 @@ def test_vercel_json_syntax_and_route_coverage():
         assert "/api/api/" not in dest, f"Duplicate /api prefix generated in destination for '{path}': {dest}"
 
         if is_main:
-            assert dest == "/api/index.py", f"Production path '{path}' should route to /api/index.py, got {dest}"
+            assert dest in ("/api", "/api/index", "/api/index.py"), (
+                f"Production path '{path}' should route to serverless adapter, got {dest}"
+            )
         elif is_staging:
             assert "agentshield-backend-staging.onrender.com" in dest, (
                 f"Staging path '{path}' should route to Render staging, got {dest}"
@@ -192,7 +194,7 @@ def test_vercel_json_syntax_and_route_coverage():
     for path in frontend_test_paths:
         dest = resolve_rewrite(path)
         assert dest == "/index.html", f"Frontend path '{path}' should fallback to /index.html, got {dest}"
-        assert dest != "/api/index.py", f"SPA route '{path}' unexpectedly routed to backend"
+        assert dest not in ("/api", "/api/index", "/api/index.py"), f"SPA route '{path}' unexpectedly routed to backend"
         assert "agentshield-backend-staging.onrender.com" not in (dest or ""), (
             f"Frontend path '{path}' was accidentally forwarded to Render: {dest}"
         )
@@ -216,7 +218,7 @@ def test_production_branch_vercel_json_isolation():
             continue
         assert (
             dest.startswith("https://agentshield-backend-staging.onrender.com")
-            or dest == "/api/index.py"
+            or dest in ("/api", "/api/index", "/api/index.py")
         ), f"Unauthorized rewrite destination found: {dest}"
 
 
