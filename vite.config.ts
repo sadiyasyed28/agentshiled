@@ -2,6 +2,8 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 
+const backendTarget = process.env.VITE_BACKEND_TARGET || process.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -12,36 +14,44 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
       '/health': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
       '/events': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
       '/incident': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
       '/audit': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
       '/authorize': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
       '/execute': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
       '/metrics': {
-        target: 'http://127.0.0.1:8000',
+        target: backendTarget,
         changeOrigin: true,
+        secure: false,
       },
     },
   },
