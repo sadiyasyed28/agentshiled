@@ -5,16 +5,20 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api",
+      "destination": "/api/index.py"
+    },
+    {
       "source": "/api/(.*)",
-      "destination": "https://agentshield-backend-staging.onrender.com/api/$1"
+      "destination": "/api/index.py"
     },
     {
       "source": "/(health|events|check|authorize|execute|metrics)",
-      "destination": "https://agentshield-backend-staging.onrender.com/$1"
+      "destination": "/api/index.py"
     },
     {
       "source": "/(audit|incident|health)/(.*)",
-      "destination": "https://agentshield-backend-staging.onrender.com/$1/$2"
+      "destination": "/api/index.py"
     },
     {
       "source": "/((?!api/|api$|health|events|check|authorize|execute|metrics|audit/|incident/).*)",
